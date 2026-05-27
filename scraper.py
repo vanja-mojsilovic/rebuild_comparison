@@ -64,29 +64,36 @@ HIDDEN_CLASSES = {
 # HTML element-type classification helpers
 # ---------------------------------------------------------------------------
 
-# CSS selectors that indicate a carousel (swipe/auto-advance, single visible item)
-_CAROUSEL_SELECTORS = [
+# CSS selectors that indicate a slideshow (one full slide visible, auto-advance,
+# dot-nav). SpotHopper's hero/CTA blocks use UIKit's data-uk-slideshow widget,
+# which despite the "slideshow" name is the dominant pattern here.
+_SLIDESHOW_SELECTORS = [
     "[data-uk-slideshow]",
     "[data-slideshow]",
     ".uk-slideshow",
+    ".slideshow-v2-wrapper",
+    ".slideshow-wrapper",
+    ".uk-slidenav-position",
     ".slick-slider",
+    ".splide",
+    ".glide",
+    ".flickity-slider",
+]
+
+# CSS selectors that indicate a carousel (multi-item horizontal scroll/swipe,
+# typically used for reviews, testimonials, gallery thumbs).
+_CAROUSEL_SELECTORS = [
+    ".uk-slider",
+    ".uk-slider-items",
     ".swiper-container",
     ".swiper-wrapper",
+    ".swiper",
     '[data-ride="carousel"]',
     ".owl-carousel",
     '[role="listbox"]',
     ".carousel",
-    ".flickity-slider",
-]
-
-# CSS selectors that indicate a slideshow / gallery (multiple visible items)
-_SLIDESHOW_SELECTORS = [
-    ".uk-slider",
-    ".uk-slider-items",
+    ".carousel-wrapper",
     ".slick-list",
-    ".splide__list",
-    ".glide__slides",
-    ".flickity-viewport",
 ]
 
 # Class/attr tokens that mark a cover-video section
@@ -100,13 +107,59 @@ _VIDEO_CLASS_TOKENS = {
 }
 
 
+def _matches_any(el: Tag, selectors: list) -> bool:
+    """
+    True if the element itself, any ancestor, OR any descendant matches one of
+    the selectors. Both directions are needed because a section element can
+    sit *inside* a slideshow wrapper (look up) or *contain* a carousel widget
+    (look down).
+    """
+    for sel in selectors:
+        # Self + ancestors
+        cursor = el
+        while cursor is not None and isinstance(cursor, Tag):
+            if _tag_matches_simple_selector(cursor, sel):
+                return True
+            cursor = cursor.parent
+        # Descendants
+        if el.select_one(sel):
+            return True
+    return False
+
+
+def _tag_matches_simple_selector(tag: Tag, sel: str) -> bool:
+    """
+    Cheap matcher for the limited selector shapes used in our rule lists:
+      .class-name        → class membership
+      [data-attr]        → attribute presence
+      [data-attr="val"]  → attribute equality
+    """
+    if sel.startswith("."):
+        return sel[1:] in (tag.get("class") or [])
+    if sel.startswith("[") and sel.endswith("]"):
+        body = sel[1:-1]
+        if "=" in body:
+            name, val = body.split("=", 1)
+            val = val.strip().strip('"').strip("'")
+            return tag.get(name.strip()) == val
+        return tag.has_attr(body.strip())
+    return False
+
+
 def _detect_html_element_type(el: Tag, matched_selector: str) -> str:
     """
     Classify one section element into one of four layout types:
-      - "carousel"    single-item auto/swipe widget (reviews, hero slides)
-      - "slideshow"   multi-item gallery / image strip
+      - "slideshow"   one slide visible at a time with auto-advance / dot nav
+                      (UIKit data-uk-slideshow, SpotHopper slideshow-v2-wrapper,
+                      Slick single-slider, Splide, Glide, Flickity)
+      - "carousel"    multi-item horizontal scroll/swipe (reviews row, gallery
+                      thumbs, owl/swiper/bootstrap carousels, .uk-slider)
       - "cover_video" full-bleed background video
       - "text+image"  standard content block (default)
+
+    Detection is hierarchical: the section element may be an *inner* node of a
+    slideshow (e.g. div.uk-overlay-panel inside a single <li> slide). In that
+    case the wrapper is several levels up, so we walk ancestors.
 
     Parameters
     ----------
@@ -116,29 +169,30 @@ def _detect_html_element_type(el: Tag, matched_selector: str) -> str:
         The CSS selector string that caused this element to be selected
         (one of SECTION_SELECTORS).
     """
-    # 1. Selector-based fast paths
+    # 1. Selector-based fast paths from SECTION_SELECTORS
     if "carousel-wrapper" in matched_selector:
         return "carousel"
     if "custom_html_1-section" in matched_selector:
         return "cover_video"
 
-    # 2. Look for carousel signals anywhere inside the element
-    for sel in _CAROUSEL_SELECTORS:
-        if el.select_one(sel):
-            return "carousel"
+    # 2. Slideshow check first — walk ANCESTORS as well as descendants.
+    #    SpotHopper's slideshow-v2-wrapper sits above the uk-overlay-panel that
+    #    the section selector matched, so we have to look upward.
+    if _matches_any(el, _SLIDESHOW_SELECTORS):
+        return "slideshow"
 
-    # 3. Look for slideshow / gallery signals
-    for sel in _SLIDESHOW_SELECTORS:
-        if el.select_one(sel):
-            return "slideshow"
+    # 3. Carousel check — also walk ancestors (reviews are wrapped above).
+    if _matches_any(el, _CAROUSEL_SELECTORS):
+        return "carousel"
 
-    # Image-gallery pattern: <ul>/<ol> whose direct <li> children each hold an <img>
+    # 4. Image-gallery pattern: a <ul>/<ol> in the section whose direct
+    #    <li> children each contain an <img>. Treat as slideshow.
     for list_el in el.find_all(["ul", "ol"]):
         items = list_el.find_all("li", recursive=False)
         if len(items) > 1 and all(li.find("img") for li in items):
             return "slideshow"
 
-    # 4. Cover-video signals
+    # 5. Cover-video signals (descendants or own class)
     for video_el in el.find_all("video"):
         if video_el.get("autoplay") is not None or video_el.get("muted") is not None:
             return "cover_video"
@@ -154,7 +208,7 @@ def _detect_html_element_type(el: Tag, matched_selector: str) -> str:
         if desc_classes & _VIDEO_CLASS_TOKENS:
             return "cover_video"
 
-    # 5. Default
+    # 6. Default
     return "text+image"
 
 
