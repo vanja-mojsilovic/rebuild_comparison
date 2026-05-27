@@ -32,11 +32,12 @@ REPORT_HEADERS = [
     "New URL",
     "Service",
     "Section pair",
-    "Element",
+    "Old element",
     "Old text",
     "Old href",
     "Old hidden",
     "Old HTML type",
+    "New element",
     "New text",
     "New href",
     "New hidden",
@@ -45,9 +46,9 @@ REPORT_HEADERS = [
 ]
 
 # Column range used for reads/writes — grows with REPORT_HEADERS.
-# A1 + 16 columns → A:P
-REPORT_RANGE = f"{REPORT_TAB}!A:P"
-REPORT_HEADER_RANGE = f"{REPORT_TAB}!A1:P1"
+# A1 + 17 columns → A:Q
+REPORT_RANGE = f"{REPORT_TAB}!A:Q"
+REPORT_HEADER_RANGE = f"{REPORT_TAB}!A1:Q1"
 
 
 def get_sheets_service():
@@ -111,11 +112,12 @@ def build_sheet_rows(timestamp, restaurant, old_url, new_url, comparison_rows):
             new_url,
             r.get("service", ""),
             r.get("section_pair", ""),
-            r.get("element", ""),
+            r.get("old_element", ""),
             r.get("old_text", ""),
             r.get("old_href", ""),
             r.get("old_hidden", ""),
             r.get("old_html_type", ""),
+            r.get("new_element", ""),
             r.get("new_text", ""),
             r.get("new_href", ""),
             r.get("new_hidden", ""),
@@ -183,7 +185,7 @@ def main():
             traceback.print_exc()
             append_to_report(sheets, spreadsheet_id, [[
                 timestamp, "(error)", old_url, new_url,
-                "error", "", "", str(e)[:500], "", "", "", "", "", "", "", "ERROR",
+                "error", "", "", str(e)[:500], "", "", "", "", "", "", "", "", "ERROR",
             ]])
 
     print(f"\nDone. {len(pairs) - failures} succeeded, {failures} failed.")
