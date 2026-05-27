@@ -19,6 +19,7 @@ NOT also appear in paragraphs/headings/etc.
 
 from playwright.sync_api import sync_playwright
 from bs4 import BeautifulSoup, Tag
+import re
 
 
 SECTION_SELECTORS = [
@@ -60,13 +61,13 @@ def scrape_page(url: str, timeout_ms: int = 30000) -> dict:
 def parse_html(html: str, base_url: str = "") -> dict:
     """Parse rendered HTML into structured sections + identity fields."""
     soup = BeautifulSoup(html, "html.parser")
-
     return {
         "base_url": base_url,
         "title": (soup.title.string.strip() if soup.title and soup.title.string else ""),
         "restaurant_name": extract_restaurant_name(soup),
         "sections": extract_sections(soup),
         "identity": extract_identity(soup),
+        "reviews": extract_reviews(soup),
         "all_links": collect_all_links(soup),
     }
 
@@ -192,7 +193,6 @@ def extract_identity(soup: BeautifulSoup) -> dict:
             city_state = ", ".join([x for x in [locality, region] if x])
     zip_code = (pick(".contact-location .zip") or pick(".zip")
                 or pick('[itemprop="postalCode"]'))
-
     phone_el = (
         soup.select_one('.contact-us a[href^="tel:"]')
         or soup.select_one('.contact-location a[href^="tel:"]')
@@ -202,7 +202,6 @@ def extract_identity(soup: BeautifulSoup) -> dict:
     phone_href = phone_el.get("href", "") if phone_el else ""
     phone_display = _clean_text(phone_el.get_text()) if phone_el else ""
     phone_digits = "".join(c for c in (phone_href or phone_display) if c.isdigit())
-
     mail_el = (
         soup.select_one('.contact-us a[href^="mailto:"]')
         or soup.select_one('.contact-location a[href^="mailto:"]')
@@ -212,7 +211,6 @@ def extract_identity(soup: BeautifulSoup) -> dict:
     email_href = mail_el.get("href", "") if mail_el else ""
     email_display = _clean_text(mail_el.get_text()) if mail_el else ""
     email_normalized = email_href.replace("mailto:", "").strip().lower()
-
     google_link = ""
     for a in soup.find_all("a", href=True):
         href = a["href"]
@@ -229,7 +227,6 @@ def extract_identity(soup: BeautifulSoup) -> dict:
         if any(s in href for s in ("google.com/maps", "maps.google.com", "g.page/")):
             google_link = href
             break
-
     return {
         "address": {
             "street": street,
@@ -248,6 +245,55 @@ def extract_identity(soup: BeautifulSoup) -> dict:
         "google_link": google_link,
     }
 
+def extract_reviews(soup: BeautifulSoup) -> list:
+    """
+    Pull review snippets from the page. Tries four patterns:
+      1. SpotHopper blockquote layout
+      2. schema.org Review microdata
+      3. Generic .review / .testimonial CSS classes
+      4. Third-party widget markers (Yelp / Google reviews badges)
+    Returns a list of dicts: {text, reviewer}.
+    """
+    out = []
+    seen = set()
+    def push(text, reviewer):
+        text = _clean_text(text or "")
+        reviewer = _clean_text(reviewer or "")
+        if not text or len(text) < 10:
+            return
+        key = text.lower()
+        if key in seen:
+            return
+        seen.add(key)
+        out.append({"text": text, "reviewer": reviewer})
+    # 1. blockquote layout (SpotHopper default)
+    for bq in soup.find_all("blockquote"):
+        p = bq.find("p")
+        text = (p.get_text() if p else bq.get_text()) or ""
+        reviewer = ""
+        parent = bq.parent
+        if parent:
+            heading = parent.find(["h3", "h4"]) or parent.find(class_=lambda c: c and ("reviewer" in c or "review-author" in c))
+            if heading:
+                reviewer = re.sub(r"^.*?by\s*", "", heading.get_text(), flags=re.I)
+                reviewer = re.sub(r"[:|-].*$", "", reviewer).strip()
+        push(text, reviewer)
+    # 2. schema.org Review microdata
+    for el in soup.find_all(attrs={"itemtype": re.compile(r"Review", re.I)}):
+        body = el.find(attrs={"itemprop": "reviewBody"})
+        author = el.find(attrs={"itemprop": "author"})
+        push(body.get_text() if body else "", author.get_text() if author else "")
+    # 3. Generic class-based review markup
+    for sel in (".review", ".review-item", ".testimonial"):
+        for el in soup.select(sel):
+            push(el.get_text(), "")
+    # 4. Third-party widget markers (content rendered by JS we can't crawl)
+    if not out:
+        if soup.select_one('[id^="yelp-biz-badge-"], [class*="yelp-widget"]'):
+            push("[Yelp reviews widget — content rendered by JS, not visible in HTML]", "")
+        elif soup.select_one('[class*="google-review"], [class*="grw-"]'):
+            push("[Google reviews widget — content rendered by JS, not visible in HTML]", "")
+    return out
 
 def extract_restaurant_name(soup: BeautifulSoup) -> str:
     """

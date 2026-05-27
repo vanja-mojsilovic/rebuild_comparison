@@ -1,6 +1,6 @@
 """
 Read URL pairs from the 'urls' tab of a Google Sheet, run a rebuild
-comparison for each row, and append the extracted content as rows in
+comparison for each row, and append validated comparison rows in
 the 'report' tab.
 
 Triggered by the GitHub Actions workflow. Requires two env vars:
@@ -18,7 +18,7 @@ from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 
 from scraper import scrape_page
-from comparator import build_sections_view
+from comparator import build_validated_rows
 
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
@@ -30,21 +30,23 @@ REPORT_HEADERS = [
     "Restaurant",
     "Old URL",
     "New URL",
-    "Side",
-    "Section #",
     "Service",
+    "Section pair",
     "Element",
-    "Text",
-    "Href",
+    "Old text",
+    "Old href",
+    "Old hidden",
+    "New text",
+    "New href",
+    "New hidden",
+    "Match",
 ]
 
 
 def get_sheets_service():
-    """Authenticate using the JSON in the GOOGLE_SERVICE_ACCOUNT_JSON env var."""
     raw = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
     if not raw:
-        print("ERROR: GOOGLE_SERVICE_ACCOUNT_JSON env var is not set",
-              file=sys.stderr)
+        print("ERROR: GOOGLE_SERVICE_ACCOUNT_JSON env var is not set", file=sys.stderr)
         sys.exit(1)
     info = json.loads(raw)
     creds = Credentials.from_service_account_info(info, scopes=SCOPES)
@@ -52,17 +54,14 @@ def get_sheets_service():
 
 
 def read_url_pairs(service, spreadsheet_id):
-    """Read the 'urls' tab. First row is the header; following rows are pairs."""
     result = service.spreadsheets().values().get(
         spreadsheetId=spreadsheet_id,
         range=f"{URLS_TAB}!A:B",
     ).execute()
     rows = result.get("values", [])
-
     if not rows:
         return []
 
-    # Skip header row, filter out empty / malformed rows
     pairs = []
     for row in rows[1:]:
         if len(row) < 2:
@@ -74,10 +73,9 @@ def read_url_pairs(service, spreadsheet_id):
 
 
 def ensure_report_headers(service, spreadsheet_id):
-    """If the report tab is empty, write the header row first."""
     result = service.spreadsheets().values().get(
         spreadsheetId=spreadsheet_id,
-        range=f"{REPORT_TAB}!A1:J1",
+        range=f"{REPORT_TAB}!A1:N1",
     ).execute()
     if not result.get("values"):
         service.spreadsheets().values().update(
@@ -88,41 +86,35 @@ def ensure_report_headers(service, spreadsheet_id):
         ).execute()
 
 
-def build_rows_for_comparison(timestamp, old_url, new_url, view):
-    """Flatten a comparison view into a list of report rows."""
-    restaurant = (
-        view.get("restaurant", {}).get("new")
-        or view.get("restaurant", {}).get("old")
-        or ""
-    )
-
-    rows = []
-    for side, sections_key in (("old", "old_sections"), ("new", "new_sections")):
-        for section_idx, section in enumerate(view.get(sections_key, []), start=1):
-            service = section.get("service", "other")
-            for item in section.get("rows", []):
-                rows.append([
-                    timestamp,
-                    restaurant,
-                    old_url,
-                    new_url,
-                    side,
-                    section_idx,
-                    service,
-                    item.get("tag", ""),
-                    item.get("text", ""),
-                    item.get("href", ""),
-                ])
-    return rows
+def build_sheet_rows(timestamp, restaurant, old_url, new_url, comparison_rows):
+    """Flatten validated comparison rows into spreadsheet rows."""
+    out = []
+    for r in comparison_rows:
+        out.append([
+            timestamp,
+            restaurant,
+            old_url,
+            new_url,
+            r.get("service", ""),
+            r.get("section_pair", ""),
+            r.get("element", ""),
+            r.get("old_text", ""),
+            r.get("old_href", ""),
+            r.get("old_hidden", ""),
+            r.get("new_text", ""),
+            r.get("new_href", ""),
+            r.get("new_hidden", ""),
+            r.get("match", ""),
+        ])
+    return out
 
 
 def append_to_report(service, spreadsheet_id, rows):
-    """Append rows to the report tab."""
     if not rows:
         return
     service.spreadsheets().values().append(
         spreadsheetId=spreadsheet_id,
-        range=f"{REPORT_TAB}!A:J",
+        range=f"{REPORT_TAB}!A:N",
         valueInputOption="RAW",
         insertDataOption="INSERT_ROWS",
         body={"values": rows},
@@ -140,7 +132,7 @@ def main():
     print("Reading URL pairs from sheet...", flush=True)
     pairs = read_url_pairs(sheets, spreadsheet_id)
     if not pairs:
-        print("No valid URL pairs found in the 'urls' tab. Nothing to do.")
+        print("No valid URL pairs found in the 'urls' tab.")
         return
 
     print(f"Found {len(pairs)} URL pair(s) to process.", flush=True)
@@ -154,18 +146,28 @@ def main():
         try:
             old_data = scrape_page(old_url)
             new_data = scrape_page(new_url)
-            view = build_sections_view(old_data, new_data)
-            rows = build_rows_for_comparison(timestamp, old_url, new_url, view)
-            append_to_report(sheets, spreadsheet_id, rows)
-            print(f"  ✓ wrote {len(rows)} rows", flush=True)
+            restaurant = (
+                new_data.get("restaurant_name")
+                or old_data.get("restaurant_name")
+                or "(unknown)"
+            )
+            comparison_rows = build_validated_rows(old_data, new_data)
+            sheet_rows = build_sheet_rows(
+                timestamp, restaurant, old_url, new_url, comparison_rows
+            )
+            append_to_report(sheets, spreadsheet_id, sheet_rows)
+
+            ok = sum(1 for r in comparison_rows if r.get("match") == "OK")
+            issues = len(comparison_rows) - ok
+            print(f"  ✓ wrote {len(sheet_rows)} rows  "
+                  f"(OK: {ok}, issues: {issues})", flush=True)
         except Exception as e:
             failures += 1
             print(f"  ✗ FAILED: {e}", flush=True)
             traceback.print_exc()
-            # Write a single failure row so the run is visible in the sheet
             append_to_report(sheets, spreadsheet_id, [[
                 timestamp, "(error)", old_url, new_url,
-                "error", "", "", "", str(e)[:500], "",
+                "error", "", "", str(e)[:500], "", "", "", "", "", "ERROR",
             ]])
 
     print(f"\nDone. {len(pairs) - failures} succeeded, {failures} failed.")
