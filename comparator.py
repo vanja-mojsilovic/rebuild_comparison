@@ -9,6 +9,10 @@ Validation logic for the rebuild use case:
   - Multiple sections of the same service are paired by content similarity,
     not by document order
 
+Each emitted row also carries the HTML element type for both sides
+(slideshow / carousel / cover_video / text+image) so the report can
+show what kind of block each section is rendered as.
+
 Returns flat row data shaped for writing into the Google Sheet.
 """
 
@@ -44,6 +48,10 @@ COMPARISON_FIELDS = [
 ]
 
 
+# Default when a section dict pre-dates the html_element_type field
+DEFAULT_HTML_TYPE = "text+image"
+
+
 # ------------------------------------------------------------
 # Classification
 # ------------------------------------------------------------
@@ -65,6 +73,13 @@ def group_by_service(sections: list) -> dict:
         svc = classify_service(s)
         out.setdefault(svc, []).append(s)
     return out
+
+
+def _html_type(section: Optional[dict]) -> str:
+    """Return the section's html_element_type, falling back to default."""
+    if not section:
+        return ""
+    return section.get("html_element_type") or DEFAULT_HTML_TYPE
 
 
 # ------------------------------------------------------------
@@ -134,10 +149,10 @@ def build_validated_rows(old_data: dict, new_data: dict) -> list:
 
     Each row dict has:
         service           — classified service name
-        element           — H1, H2, H3, P, LI, BUTTON, REVIEW
-        comparison_field  — "H1→H2", "H2→H3", "P", "LI", "BUTTON", "REVIEW"
-        old_text, old_href, old_hidden
-        new_text, new_href, new_hidden
+        section_pair      — pair index within service
+        element           — H1→H2, H2→H3, H3, P, LI, BUTTON, REVIEW
+        old_text, old_href, old_hidden, old_html_type
+        new_text, new_href, new_hidden, new_html_type
         match             — "OK" / "MISSING on new" / "EXTRA on new" / "DIFFERS"
     """
     old_by_svc = group_by_service(old_data["sections"])
@@ -164,6 +179,9 @@ def _compare_section_pair(service, pair_idx, old_sec, new_sec) -> list:
     """Walk a paired (Old, New) section pair and emit comparison rows."""
     out = []
 
+    old_type = _html_type(old_sec)
+    new_type = _html_type(new_sec)
+
     # If one side is missing the whole section, emit one row per element
     # that exists on the present side, marking the other side empty.
     if old_sec is None or new_sec is None:
@@ -174,13 +192,13 @@ def _compare_section_pair(service, pair_idx, old_sec, new_sec) -> list:
             for text in present.get(field, []):
                 if side_missing == "old":
                     out.append(_row(service, pair_idx, label,
-                                    "", "", "",
-                                    text, "", "",
+                                    "", "", "", old_type,
+                                    text, "", "", new_type,
                                     "EXTRA on new"))
                 else:
                     out.append(_row(service, pair_idx, label,
-                                    text, "", "",
-                                    "", "", "",
+                                    text, "", "", old_type,
+                                    "", "", "", new_type,
                                     "MISSING on new"))
         for btn in present.get("buttons", []):
             v = btn.get("visible_text", "") or btn.get("text", "")
@@ -188,13 +206,13 @@ def _compare_section_pair(service, pair_idx, old_sec, new_sec) -> list:
             href = btn.get("href", "")
             if side_missing == "old":
                 out.append(_row(service, pair_idx, "BUTTON",
-                                "", "", "",
-                                v, href, h,
+                                "", "", "", old_type,
+                                v, href, h, new_type,
                                 "EXTRA on new"))
             else:
                 out.append(_row(service, pair_idx, "BUTTON",
-                                v, href, h,
-                                "", "", "",
+                                v, href, h, old_type,
+                                "", "", "", new_type,
                                 "MISSING on new"))
         return out
 
@@ -202,17 +220,24 @@ def _compare_section_pair(service, pair_idx, old_sec, new_sec) -> list:
     for (o_field, n_field, label) in COMPARISON_FIELDS:
         old_texts = old_sec.get(o_field, [])
         new_texts = new_sec.get(n_field, [])
-        out.extend(_compare_text_lists(service, pair_idx, label, old_texts, new_texts))
+        out.extend(_compare_text_lists(
+            service, pair_idx, label, old_texts, new_texts,
+            old_type, new_type,
+        ))
 
     # Buttons compared with text AND href
-    out.extend(_compare_buttons(service, pair_idx,
-                                old_sec.get("buttons", []),
-                                new_sec.get("buttons", [])))
+    out.extend(_compare_buttons(
+        service, pair_idx,
+        old_sec.get("buttons", []),
+        new_sec.get("buttons", []),
+        old_type, new_type,
+    ))
 
     return out
 
 
-def _compare_text_lists(service, pair_idx, label, old_texts, new_texts) -> list:
+def _compare_text_lists(service, pair_idx, label, old_texts, new_texts,
+                        old_type, new_type) -> list:
     """
     Side-by-side comparison of two lists of text strings.
     Output is "one row per Old element + the matching New element".
@@ -232,8 +257,8 @@ def _compare_text_lists(service, pair_idx, label, old_texts, new_texts) -> list:
         if matched_n is not None:
             new_remaining.remove(matched_n)
             rows.append(_row(service, pair_idx, label,
-                             o_text, "", "",
-                             matched_n, "", "",
+                             o_text, "", "", old_type,
+                             matched_n, "", "", new_type,
                              "OK"))
         else:
             # Old has text that doesn't appear on New in any form
@@ -241,25 +266,26 @@ def _compare_text_lists(service, pair_idx, label, old_texts, new_texts) -> list:
             if new_remaining:
                 n_text = new_remaining.pop(0)
                 rows.append(_row(service, pair_idx, label,
-                                 o_text, "", "",
-                                 n_text, "", "",
+                                 o_text, "", "", old_type,
+                                 n_text, "", "", new_type,
                                  "DIFFERS"))
             else:
                 rows.append(_row(service, pair_idx, label,
-                                 o_text, "", "",
-                                 "", "", "",
+                                 o_text, "", "", old_type,
+                                 "", "", "", new_type,
                                  "MISSING on new"))
 
     for n_text in new_remaining:
         rows.append(_row(service, pair_idx, label,
-                         "", "", "",
-                         n_text, "", "",
+                         "", "", "", old_type,
+                         n_text, "", "", new_type,
                          "EXTRA on new"))
 
     return rows
 
 
-def _compare_buttons(service, pair_idx, old_btns, new_btns) -> list:
+def _compare_buttons(service, pair_idx, old_btns, new_btns,
+                     old_type, new_type) -> list:
     """Compare button lists by (visible_text, href) — both must match for OK."""
     rows = []
     new_remaining = list(new_btns)
@@ -281,10 +307,11 @@ def _compare_buttons(service, pair_idx, old_btns, new_btns) -> list:
         if matched is not None:
             new_remaining.remove(matched)
             rows.append(_row(service, pair_idx, "BUTTON",
-                             o_visible, o_href, o_hidden,
+                             o_visible, o_href, o_hidden, old_type,
                              matched.get("visible_text", "") or matched.get("text", ""),
                              matched.get("href", ""),
                              matched.get("hidden_text", ""),
+                             new_type,
                              "OK"))
         else:
             # Look for visible-text match with different href → still differs but pair them
@@ -297,31 +324,34 @@ def _compare_buttons(service, pair_idx, old_btns, new_btns) -> list:
             if partial is not None:
                 new_remaining.remove(partial)
                 rows.append(_row(service, pair_idx, "BUTTON",
-                                 o_visible, o_href, o_hidden,
+                                 o_visible, o_href, o_hidden, old_type,
                                  partial.get("visible_text", "") or partial.get("text", ""),
                                  partial.get("href", ""),
                                  partial.get("hidden_text", ""),
+                                 new_type,
                                  "DIFFERS"))
             elif new_remaining:
                 n = new_remaining.pop(0)
                 rows.append(_row(service, pair_idx, "BUTTON",
-                                 o_visible, o_href, o_hidden,
+                                 o_visible, o_href, o_hidden, old_type,
                                  n.get("visible_text", "") or n.get("text", ""),
                                  n.get("href", ""),
                                  n.get("hidden_text", ""),
+                                 new_type,
                                  "DIFFERS"))
             else:
                 rows.append(_row(service, pair_idx, "BUTTON",
-                                 o_visible, o_href, o_hidden,
-                                 "", "", "",
+                                 o_visible, o_href, o_hidden, old_type,
+                                 "", "", "", new_type,
                                  "MISSING on new"))
 
     for n in new_remaining:
         rows.append(_row(service, pair_idx, "BUTTON",
-                         "", "", "",
+                         "", "", "", old_type,
                          n.get("visible_text", "") or n.get("text", ""),
                          n.get("href", ""),
                          n.get("hidden_text", ""),
+                         new_type,
                          "EXTRA on new"))
 
     return rows
@@ -331,10 +361,14 @@ def _compare_reviews(old_reviews, new_reviews) -> list:
     """
     Compare reviews across the two sites. Each review is its own row.
     In a rebuild the same set of reviews should appear on both sides.
+    Reviews are rendered as a carousel on both old and new sites.
     """
     rows = []
     new_keys = {_review_key(r): r for r in new_reviews}
     seen_new = set()
+
+    # Reviews are always rendered as a carousel widget
+    review_type = "carousel"
 
     for o in old_reviews:
         k = _review_key(o)
@@ -342,20 +376,20 @@ def _compare_reviews(old_reviews, new_reviews) -> list:
         if n is not None:
             seen_new.add(k)
             rows.append(_row("reviews", 1, "REVIEW",
-                             o.get("text", ""), "", o.get("reviewer", ""),
-                             n.get("text", ""), "", n.get("reviewer", ""),
+                             o.get("text", ""), "", o.get("reviewer", ""), review_type,
+                             n.get("text", ""), "", n.get("reviewer", ""), review_type,
                              "OK"))
         else:
             rows.append(_row("reviews", 1, "REVIEW",
-                             o.get("text", ""), "", o.get("reviewer", ""),
-                             "", "", "",
+                             o.get("text", ""), "", o.get("reviewer", ""), review_type,
+                             "", "", "", review_type,
                              "MISSING on new"))
 
     for n in new_reviews:
         if _review_key(n) not in seen_new:
             rows.append(_row("reviews", 1, "REVIEW",
-                             "", "", "",
-                             n.get("text", ""), "", n.get("reviewer", ""),
+                             "", "", "", review_type,
+                             n.get("text", ""), "", n.get("reviewer", ""), review_type,
                              "EXTRA on new"))
 
     return rows
@@ -370,8 +404,8 @@ def _review_key(review: dict) -> str:
 
 
 def _row(service, pair_idx, element,
-         old_text, old_href, old_hidden,
-         new_text, new_href, new_hidden,
+         old_text, old_href, old_hidden, old_html_type,
+         new_text, new_href, new_hidden, new_html_type,
          match) -> dict:
     """Construct a single comparison row in the canonical shape."""
     return {
@@ -381,9 +415,11 @@ def _row(service, pair_idx, element,
         "old_text": old_text,
         "old_href": old_href,
         "old_hidden": old_hidden,
+        "old_html_type": old_html_type,
         "new_text": new_text,
         "new_href": new_href,
         "new_hidden": new_hidden,
+        "new_html_type": new_html_type,
         "match": match,
     }
 

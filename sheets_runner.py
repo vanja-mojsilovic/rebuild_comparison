@@ -36,11 +36,18 @@ REPORT_HEADERS = [
     "Old text",
     "Old href",
     "Old hidden",
+    "Old HTML type",
     "New text",
     "New href",
     "New hidden",
+    "New HTML type",
     "Match",
 ]
+
+# Column range used for reads/writes — grows with REPORT_HEADERS.
+# A1 + 16 columns → A:P
+REPORT_RANGE = f"{REPORT_TAB}!A:P"
+REPORT_HEADER_RANGE = f"{REPORT_TAB}!A1:P1"
 
 
 def get_sheets_service():
@@ -73,11 +80,18 @@ def read_url_pairs(service, spreadsheet_id):
 
 
 def ensure_report_headers(service, spreadsheet_id):
+    """
+    Write the header row if missing. If the existing header row is the
+    OLD shape (no 'Old HTML type' / 'New HTML type'), overwrite it with
+    the new headers — existing data rows will just have blank values
+    in those columns until the next run, which is fine.
+    """
     result = service.spreadsheets().values().get(
         spreadsheetId=spreadsheet_id,
-        range=f"{REPORT_TAB}!A1:N1",
+        range=REPORT_HEADER_RANGE,
     ).execute()
-    if not result.get("values"):
+    existing = result.get("values", [])
+    if not existing or existing[0] != REPORT_HEADERS:
         service.spreadsheets().values().update(
             spreadsheetId=spreadsheet_id,
             range=f"{REPORT_TAB}!A1",
@@ -101,9 +115,11 @@ def build_sheet_rows(timestamp, restaurant, old_url, new_url, comparison_rows):
             r.get("old_text", ""),
             r.get("old_href", ""),
             r.get("old_hidden", ""),
+            r.get("old_html_type", ""),
             r.get("new_text", ""),
             r.get("new_href", ""),
             r.get("new_hidden", ""),
+            r.get("new_html_type", ""),
             r.get("match", ""),
         ])
     return out
@@ -114,7 +130,7 @@ def append_to_report(service, spreadsheet_id, rows):
         return
     service.spreadsheets().values().append(
         spreadsheetId=spreadsheet_id,
-        range=f"{REPORT_TAB}!A:N",
+        range=REPORT_RANGE,
         valueInputOption="RAW",
         insertDataOption="INSERT_ROWS",
         body={"values": rows},
@@ -167,7 +183,7 @@ def main():
             traceback.print_exc()
             append_to_report(sheets, spreadsheet_id, [[
                 timestamp, "(error)", old_url, new_url,
-                "error", "", "", str(e)[:500], "", "", "", "", "", "ERROR",
+                "error", "", "", str(e)[:500], "", "", "", "", "", "", "", "ERROR",
             ]])
 
     print(f"\nDone. {len(pairs) - failures} succeeded, {failures} failed.")
