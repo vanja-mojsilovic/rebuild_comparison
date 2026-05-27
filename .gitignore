@@ -1,0 +1,22 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.coverage
+.env
+.playwright/
+
+# Service account JSON keys — NEVER commit these
+*.json
+!package.json
+!.vscode/*.json
+
+# Local test outputs
+output/
+saved_reports/
+/*-rebuild-comparison.html
+
+# OS
+.DS_Store
+Thumbs.db

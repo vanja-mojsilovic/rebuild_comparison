@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Rebuild Comparison Tool</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div class="app">
+    <header class="app-header">
+      <h1>Rebuild Comparison Tool</h1>
+      <p class="subtitle">
+        Verify that a rebuilt website is content-identical to its predecessor.
+        Headings shift one level down (H1→H2) and URL paths may be shortened — everything else must match.
+      </p>
+    </header>
+
+    {% if error %}
+      <div class="status-bar error">{{ error }}</div>
+    {% endif %}
+
+    <form method="post" action="/compare" class="input-section">
+      <div class="form-group">
+        <label for="old_url">Old Website URL</label>
+        <input type="url" id="old_url" name="old_url" required
+               placeholder="https://old.example.com"
+               value="{{ old_url or '' }}">
+      </div>
+
+      <div class="form-group">
+        <label for="new_url">New Website URL (rebuild)</label>
+        <input type="url" id="new_url" name="new_url" required
+               placeholder="https://new.example.com"
+               value="{{ new_url or '' }}">
+      </div>
+
+      <div class="button-row">
+        <button type="submit" class="btn-primary">Compare</button>
+      </div>
+    </form>
+
+    <p class="footer-note">
+      First run will take ~30 seconds while Playwright loads both pages.
+      Subsequent runs are faster (browser stays warm).
+    </p>
+  </div>
+</body>
+</html>

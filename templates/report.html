@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>
+    {% if view.restaurant.new %}{{ view.restaurant.new }} — Rebuild Comparison
+    {% elif view.restaurant.old %}{{ view.restaurant.old }} — Rebuild Comparison
+    {% else %}Comparison Report{% endif %}
+  </title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div class="app wide">
+    <header class="app-header">
+      <h1>
+        {% if view.restaurant.new %}
+          {{ view.restaurant.new }} — Rebuild Comparison
+        {% elif view.restaurant.old %}
+          {{ view.restaurant.old }} — Rebuild Comparison
+        {% else %}
+          Side-by-Side Comparison
+        {% endif %}
+      </h1>
+      {% if view.restaurant.old and view.restaurant.new and view.restaurant.old != view.restaurant.new %}
+        <p class="subtitle">
+          Old site name: <strong>{{ view.restaurant.old }}</strong> · New site name: <strong>{{ view.restaurant.new }}</strong>
+        </p>
+      {% endif %}
+      <div style="margin-top:12px; display:flex; gap:12px; justify-content:center; align-items:center; flex-wrap:wrap;">
+        <a href="/" class="back-link">← Run another comparison</a>
+        <form method="post" action="/download" style="display:inline; margin:0;">
+          <input type="hidden" name="old_url" value="{{ old_url }}">
+          <input type="hidden" name="new_url" value="{{ new_url }}">
+          <button type="submit" class="btn-primary" style="height:34px; padding:6px 16px; font-size:13px;">
+            ⬇ Download as HTML
+          </button>
+        </form>
+      </div>
+    </header>
+
+    {# ---------- LOCATION IDENTITY block (fully inline-styled) ---------- #}
+    <section style="background:#ffffff; border-radius:12px; box-shadow:0 1px 3px rgba(48,128,19,0.12); overflow:hidden; margin-bottom:24px;">
+      <div style="padding:20px 24px; border-bottom:1px solid #d4ebc7;">
+        <h2 style="font-size:18px; font-weight:600; color:#1a4409; margin:0;">LOCATION IDENTITY</h2>
+      </div>
+      <div style="overflow-x:auto;">
+        <table style="width:100%; border-collapse:collapse; font-size:14px; table-layout:fixed;">
+          <thead style="background:#eef7e8;">
+            <tr>
+              <th style="text-align:left; padding:12px 16px; font-weight:600; color:#245d0e; font-size:13px; text-transform:uppercase; letter-spacing:0.03em; border-bottom:1px solid #a7d695; width:120px;">Field</th>
+              <th style="text-align:left; padding:12px 16px; font-weight:600; color:#245d0e; font-size:13px; text-transform:uppercase; letter-spacing:0.03em; border-bottom:1px solid #a7d695;">Old</th>
+              <th style="text-align:left; padding:12px 16px; font-weight:600; color:#245d0e; font-size:13px; text-transform:uppercase; letter-spacing:0.03em; border-bottom:1px solid #a7d695;">New</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td style="padding:12px 16px; border-bottom:1px solid #e4f2db; vertical-align:top; color:#0f2906;">
+                <span style="display:inline-block; padding:2px 8px; border-radius:4px; font-size:11px; font-weight:600; background:#e4f2db; color:#245d0e; text-transform:uppercase; letter-spacing:0.05em;">Address</span>
+              </td>
+              <td style="padding:12px 16px; border-bottom:1px solid #e4f2db; vertical-align:top; color:#0f2906; word-break:break-word; white-space:pre-wrap;">{{ view.identity.old.address.full or "(not found)" }}</td>
+              <td style="padding:12px 16px; border-bottom:1px solid #e4f2db; vertical-align:top; color:#0f2906; word-break:break-word; white-space:pre-wrap;">{{ view.identity.new.address.full or "(not found)" }}</td>
+            </tr>
+            <tr>
+              <td style="padding:12px 16px; border-bottom:1px solid #e4f2db; vertical-align:top; color:#0f2906;">
+                <span style="display:inline-block; padding:2px 8px; border-radius:4px; font-size:11px; font-weight:600; background:#e4f2db; color:#245d0e; text-transform:uppercase; letter-spacing:0.05em;">Phone</span>
+              </td>
+              <td style="padding:12px 16px; border-bottom:1px solid #e4f2db; vertical-align:top; color:#0f2906; word-break:break-word; white-space:pre-wrap;">{{ view.identity.old.phone.display or "(not found)" }}</td>
+              <td style="padding:12px 16px; border-bottom:1px solid #e4f2db; vertical-align:top; color:#0f2906; word-break:break-word; white-space:pre-wrap;">{{ view.identity.new.phone.display or "(not found)" }}</td>
+            </tr>
+            <tr>
+              <td style="padding:12px 16px; border-bottom:1px solid #e4f2db; vertical-align:top; color:#0f2906;">
+                <span style="display:inline-block; padding:2px 8px; border-radius:4px; font-size:11px; font-weight:600; background:#e4f2db; color:#245d0e; text-transform:uppercase; letter-spacing:0.05em;">Email</span>
+              </td>
+              <td style="padding:12px 16px; border-bottom:1px solid #e4f2db; vertical-align:top; color:#0f2906; word-break:break-word; white-space:pre-wrap;">{{ view.identity.old.email.display or "(not found)" }}</td>
+              <td style="padding:12px 16px; border-bottom:1px solid #e4f2db; vertical-align:top; color:#0f2906; word-break:break-word; white-space:pre-wrap;">{{ view.identity.new.email.display or "(not found)" }}</td>
+            </tr>
+            <tr>
+              <td style="padding:12px 16px; vertical-align:top; color:#0f2906;">
+                <span style="display:inline-block; padding:2px 8px; border-radius:4px; font-size:11px; font-weight:600; background:#e4f2db; color:#245d0e; text-transform:uppercase; letter-spacing:0.05em;">Google link</span>
+              </td>
+              <td style="padding:12px 16px; vertical-align:top; color:#0f2906; word-break:break-all; white-space:pre-wrap;">{{ view.identity.old.google_link or "(not found)" }}</td>
+              <td style="padding:12px 16px; vertical-align:top; color:#0f2906; word-break:break-all; white-space:pre-wrap;">{{ view.identity.new.google_link or "(not found)" }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    {# ---------- Sections table (uses external CSS classes) ---------- #}
+    <section class="result-container">
+      <div class="result-header"><h2>SECTIONS (paired by position)</h2></div>
+      <div class="table-wrapper">
+        <table class="sections-table">
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>Old Site<br><span class="mono">{{ old_url }}</span></th>
+              <th>New Site<br><span class="mono">{{ new_url }}</span></th>
+            </tr>
+          </thead>
+          <tbody>
+            {% set old_count = view.old_sections|length %}
+            {% set new_count = view.new_sections|length %}
+            {% set max_count = [old_count, new_count]|max %}
+
+            {% for i in range(max_count) %}
+              {% set old_sec = view.old_sections[i] if i < old_count else None %}
+              {% set new_sec = view.new_sections[i] if i < new_count else None %}
+              <tr>
+                <td class="row-index">{{ i + 1 }}</td>
+
+                <td class="section-cell">
+                  {% if old_sec %}
+                    <div class="section-card-header">
+                      <span class="badge-service">{{ old_sec.service | upper }}</span>
+                    </div>
+                    {% if old_sec.rows %}
+                      <ul class="section-items">
+                        {% for item in old_sec.rows %}
+                          <li class="section-item">
+                            <span class="item-tag tag-{{ item.tag | lower }}">{{ item.tag }}</span>
+                            <span>
+                              <span class="item-text">{{ item.text }}</span>
+                              {% if item.href %}
+                                <span class="item-href">→ {{ item.href }}</span>
+                              {% endif %}
+                            </span>
+                          </li>
+                        {% endfor %}
+                      </ul>
+                    {% else %}
+                      <p class="empty-note">(no text content captured)</p>
+                    {% endif %}
+                  {% else %}
+                    <p class="empty-cell">(no corresponding section)</p>
+                  {% endif %}
+                </td>
+
+                <td class="section-cell">
+                  {% if new_sec %}
+                    <div class="section-card-header">
+                      <span class="badge-service">{{ new_sec.service | upper }}</span>
+                    </div>
+                    {% if new_sec.rows %}
+                      <ul class="section-items">
+                        {% for item in new_sec.rows %}
+                          <li class="section-item">
+                            <span class="item-tag tag-{{ item.tag | lower }}">{{ item.tag }}</span>
+                            <span>
+                              <span class="item-text">{{ item.text }}</span>
+                              {% if item.href %}
+                                <span class="item-href">→ {{ item.href }}</span>
+                              {% endif %}
+                            </span>
+                          </li>
+                        {% endfor %}
+                      </ul>
+                    {% else %}
+                      <p class="empty-note">(no text content captured)</p>
+                    {% endif %}
+                  {% else %}
+                    <p class="empty-cell">(no corresponding section)</p>
+                  {% endif %}
+                </td>
+              </tr>
+            {% else %}
+              <tr>
+                <td colspan="3" class="empty-note">No sections found on either site.</td>
+              </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <p style="text-align:center; margin-top:32px;">
+      <a href="/" class="btn-primary" style="text-decoration:none; display:inline-block;">← Run another comparison</a>
+    </p>
+  </div>
+</body>
+</html>
