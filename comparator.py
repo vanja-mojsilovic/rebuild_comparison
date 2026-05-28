@@ -25,10 +25,18 @@ SERVICE_RULES = [
                                bool(re.search(r"see menu|full menu", s, re.I))),
     ("drink menu",   lambda s: bool(re.search(r"drinks", s, re.I))),
     ("online order", lambda s: bool(re.search(r"\border\b|pick up", s, re.I))),
+    # "parties" must come BEFORE "events" so a section labelled "Private Events"
+    # / "Private Dining" doesn't collapse into the generic events bucket.
+    # SpotHopper templates often rebrand a parties block as "Private Events"
+    # or "Private Dining" while still using the /parties URL slug. Treat any
+    # of those phrasings as parties.
+    ("parties",      lambda s: bool(re.search(
+                        r"parties|\bparty\b|private\s*event|private\s*dining|"
+                        r"private\s*room|book\s+your\s+event",
+                        s, re.I))),
     ("events",       lambda s: bool(re.search(r"events", s, re.I))),
     ("specials",     lambda s: bool(re.search(r"specials", s, re.I))),
-    ("catering",     lambda s: bool(re.search(r"catering", s, re.I))),
-    ("parties",      lambda s: bool(re.search(r"parties|private party|a party", s, re.I))),
+    ("catering",     lambda s: bool(re.search(r"catering|cater", s, re.I))),
     ("reservations", lambda s: bool(re.search(r"reserve|reservations|book a table", s, re.I))),
     ("jobs",         lambda s: bool(re.search(r"jobs|for a job", s, re.I))),
     ("about us",     lambda s: bool(re.search(r"about us|our story", s, re.I))),
@@ -63,13 +71,45 @@ DEFAULT_HTML_TYPE = "text+image"
 # Classification
 # ------------------------------------------------------------
 def classify_service(section: dict) -> str:
-    """Classify a section using its buttons + unified headings (h1+h2+h3)."""
+    """
+    Classify a section using, in priority order:
+      1. button visible text + the section's unified headings (h1+h2+h3)
+      2. button hrefs (URL slugs like /parties, /catering, /private-events
+         catch rebranded sections where the heading text doesn't contain
+         the keyword anymore)
+      3. paragraph text as a last resort (a "party" mention in copy)
+
+    Returns the first matching service name, or "other" if nothing matches.
+    """
     button_texts = [b["text"] for b in section.get("buttons", []) if b.get("text")]
-    sources = button_texts + section.get("headings", [])
-    for source in sources:
+    headings = section.get("headings", [])
+    # Primary signals: things the visitor actually sees as labels
+    for source in button_texts + headings:
         for name, test in SERVICE_RULES:
             if test(source):
                 return name
+
+    # Secondary signal: button hrefs. URL slugs survive rebrands
+    # (e.g. "Private Events" heading but /parties href).
+    button_hrefs = [b.get("href", "") for b in section.get("buttons", []) if b.get("href")]
+    for href in button_hrefs:
+        # Pull the last non-empty path segment, normalize dashes/underscores to spaces
+        slug = href.rstrip("/").split("?", 1)[0].split("#", 1)[0].split("/")[-1]
+        slug_text = slug.replace("-", " ").replace("_", " ")
+        if not slug_text:
+            continue
+        for name, test in SERVICE_RULES:
+            if test(slug_text):
+                return name
+
+    # Tertiary signal: paragraph text. Used only when nothing more prominent
+    # matched — copy can mention "party" / "events" incidentally without the
+    # section being about that service, so this is intentionally last.
+    for p in section.get("paragraphs", []):
+        for name, test in SERVICE_RULES:
+            if test(p):
+                return name
+
     return "other"
 
 
