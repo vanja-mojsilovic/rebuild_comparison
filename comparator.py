@@ -195,13 +195,16 @@ def build_section_pairs(old_data: dict, new_data: dict) -> list:
 
     Each row:
         {
-          "old_section_name": e.g. "about us", "reviews", "cover video",
-                              "slideshow", "carousel", "text+image",
-                              or "MISSING",
-          "new_section_name": same,
-          "old_html_type":    "slideshow" / "carousel" / "cover_video" /
-                              "text+image" / "",
-          "new_html_type":    same,
+          "old_section_name":  classified service name or kind hint, e.g.
+                               "about us", "reviews", "cover video", "gallery",
+                               or "MISSING",
+          "old_html_type":     "slideshow" / "carousel" / "cover_video" /
+                               "text+image" / "",
+          "old_heading_text":  the most prominent heading found in the section
+                               (H1 if present, else H2, else H3, else ""),
+          "new_section_name":  same as old_section_name, for the new side,
+          "new_html_type":     same,
+          "new_heading_text":  same,
         }
 
     Unlike build_validated_rows (which groups by service for content
@@ -218,16 +221,29 @@ def build_section_pairs(old_data: dict, new_data: dict) -> list:
         old_sec = old_sections[i] if i < len(old_sections) else None
         new_sec = new_sections[i] if i < len(new_sections) else None
 
-        old_name = _label_for(old_sec)
-        new_name = _label_for(new_sec)
-
         out.append({
-            "old_section_name": old_name if old_sec is not None else "MISSING",
-            "new_section_name": new_name if new_sec is not None else "MISSING",
-            "old_html_type": _html_type(old_sec) if old_sec is not None else "",
-            "new_html_type": _html_type(new_sec) if new_sec is not None else "",
+            "old_section_name": _label_for(old_sec) if old_sec is not None else "MISSING",
+            "old_html_type":    _html_type(old_sec) if old_sec is not None else "",
+            "old_heading_text": _primary_heading(old_sec) if old_sec is not None else "",
+            "new_section_name": _label_for(new_sec) if new_sec is not None else "MISSING",
+            "new_html_type":    _html_type(new_sec) if new_sec is not None else "",
+            "new_heading_text": _primary_heading(new_sec) if new_sec is not None else "",
         })
     return out
+
+
+def _primary_heading(section: dict) -> str:
+    """
+    The most prominent heading text in a section. Returns the joined H1s if
+    any exist, else H2s, else H3s, else "". Multiple headings of the same
+    level are joined with " | " so reviewers can spot multi-h1 sections (e.g.
+    a contact block with both "Location" and "Find us on") at a glance.
+    """
+    for level in ("h1", "h2", "h3"):
+        values = [v.strip() for v in section.get(level, []) if v and v.strip()]
+        if values:
+            return " | ".join(values)
+    return ""
 
 
 def _label_for(section: Optional[dict]) -> str:

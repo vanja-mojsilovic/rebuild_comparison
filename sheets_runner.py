@@ -66,13 +66,15 @@ SECTIONS_HEADERS = [
     "Restaurant name",
     "Run timestamp",
     "Old site section name",
-    "New site section name",
     "Old HTML type",
+    "Old heading text",
+    "New site section name",
     "New HTML type",
+    "New heading text",
 ]
-# Sections tab spans 6 columns → A:F
-SECTIONS_RANGE = f"{SECTIONS_TAB}!A:F"
-SECTIONS_HEADER_RANGE = f"{SECTIONS_TAB}!A1:F1"
+# Sections tab spans 8 columns → A:H
+SECTIONS_RANGE = f"{SECTIONS_TAB}!A:H"
+SECTIONS_HEADER_RANGE = f"{SECTIONS_TAB}!A1:H1"
 
 
 SEO_HEADERS = [
@@ -186,9 +188,11 @@ def build_sections_tab_rows(restaurant, timestamp, section_pairs):
             restaurant,
             timestamp,
             p.get("old_section_name", ""),
-            p.get("new_section_name", ""),
             p.get("old_html_type", ""),
+            p.get("old_heading_text", ""),
+            p.get("new_section_name", ""),
             p.get("new_html_type", ""),
+            p.get("new_heading_text", ""),
         ])
     return out
 
