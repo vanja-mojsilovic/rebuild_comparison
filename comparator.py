@@ -33,6 +33,7 @@ SERVICE_RULES = [
     ("jobs",         lambda s: bool(re.search(r"jobs|for a job", s, re.I))),
     ("about us",     lambda s: bool(re.search(r"about us|our story", s, re.I))),
     ("locations",    lambda s: bool(re.search(r"locations?|visit us|find us|our location", s, re.I))),
+    ("gift cards",   lambda s: bool(re.search(r"e?\s*-?\s*gift\s*card|gift\s*certificate", s, re.I))),
     ("reviews",      lambda s: bool(re.search(r"^reviews?$|customer reviews|what our|testimonials?", s, re.I))),
     ("gallery",      lambda s: bool(re.search(r"gallery|photo gallery|photos", s, re.I))),
     ("newsletter",   lambda s: bool(re.search(r"newsletter|sign up|subscribe", s, re.I))),

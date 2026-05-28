@@ -16,7 +16,8 @@ import json
 import os
 import sys
 import traceback
-from datetime import datetime, timezone
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
@@ -27,6 +28,12 @@ from comparator import (
     build_section_pairs,
     summarize_h1,
 )
+
+
+# All report timestamps are written in Belgrade local time (Europe/Belgrade,
+# CET/CEST with DST). Keeping a single timezone here makes ordering across
+# tabs unambiguous and matches the reviewer's working hours.
+REPORT_TZ = ZoneInfo("Europe/Belgrade")
 
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
@@ -273,7 +280,7 @@ def main():
     print(f"Found {len(pairs)} URL pair(s) to process.", flush=True)
     ensure_all_headers(sheets, spreadsheet_id)
 
-    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    timestamp = datetime.now(REPORT_TZ).strftime("%Y-%m-%d %H:%M:%S %Z")
     failures = 0
 
     for i, (old_url, new_url) in enumerate(pairs, start=1):
