@@ -1,7 +1,11 @@
 """
 Read URL pairs from the 'urls' tab of a Google Sheet, run a rebuild
-comparison for each row, and append validated comparison rows in
-the 'report' tab.
+comparison for each row, and append validated comparison rows in the
+'report' tab.
+
+Also writes two derived summary tabs:
+  - 'sections': one row per paired (old, new) section with html types
+  - 'seo':      one row per restaurant run with the page-level H1s on each side
 
 Triggered by the GitHub Actions workflow. Requires two env vars:
     GOOGLE_SERVICE_ACCOUNT_JSON  — full JSON contents of the SA key
@@ -18,12 +22,21 @@ from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 
 from scraper import scrape_page
-from comparator import build_validated_rows
+from comparator import (
+    build_validated_rows,
+    build_section_pairs,
+    collect_h1_texts,
+)
 
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 URLS_TAB = "urls"
 REPORT_TAB = "report"
+SECTIONS_TAB = "sections"
+SEO_TAB = "seo"
+
+
+# ----- Headers for each tab ----------------------------------------------
 
 REPORT_HEADERS = [
     "Run timestamp",
@@ -44,11 +57,33 @@ REPORT_HEADERS = [
     "New HTML type",
     "Match",
 ]
-
-# Column range used for reads/writes — grows with REPORT_HEADERS.
-# A1 + 17 columns → A:Q
+# Report tab spans 17 columns → A:Q
 REPORT_RANGE = f"{REPORT_TAB}!A:Q"
 REPORT_HEADER_RANGE = f"{REPORT_TAB}!A1:Q1"
+
+
+SECTIONS_HEADERS = [
+    "Restaurant name",
+    "Run timestamp",
+    "Old site section name",
+    "New site section name",
+    "Old HTML type",
+    "New HTML type",
+]
+# Sections tab spans 6 columns → A:F
+SECTIONS_RANGE = f"{SECTIONS_TAB}!A:F"
+SECTIONS_HEADER_RANGE = f"{SECTIONS_TAB}!A1:F1"
+
+
+SEO_HEADERS = [
+    "Restaurant name",
+    "Run timestamp",
+    "Old site H1",
+    "New site H1",
+]
+# SEO tab spans 4 columns → A:D
+SEO_RANGE = f"{SEO_TAB}!A:D"
+SEO_HEADER_RANGE = f"{SEO_TAB}!A1:D1"
 
 
 def get_sheets_service():
@@ -80,29 +115,41 @@ def read_url_pairs(service, spreadsheet_id):
     return pairs
 
 
-def ensure_report_headers(service, spreadsheet_id):
+def _ensure_headers(service, spreadsheet_id, header_range, write_anchor, headers):
     """
-    Write the header row if missing. If the existing header row is the
-    OLD shape (no 'Old HTML type' / 'New HTML type'), overwrite it with
-    the new headers — existing data rows will just have blank values
-    in those columns until the next run, which is fine.
+    Write the header row if missing OR if the existing row doesn't match
+    the expected shape. Existing data rows underneath are left in place;
+    if the schema changed they may be shifted, which is the caller's call
+    to clean up separately.
     """
     result = service.spreadsheets().values().get(
         spreadsheetId=spreadsheet_id,
-        range=REPORT_HEADER_RANGE,
+        range=header_range,
     ).execute()
     existing = result.get("values", [])
-    if not existing or existing[0] != REPORT_HEADERS:
+    if not existing or existing[0] != headers:
         service.spreadsheets().values().update(
             spreadsheetId=spreadsheet_id,
-            range=f"{REPORT_TAB}!A1",
+            range=write_anchor,
             valueInputOption="RAW",
-            body={"values": [REPORT_HEADERS]},
+            body={"values": [headers]},
         ).execute()
 
 
-def build_sheet_rows(timestamp, restaurant, old_url, new_url, comparison_rows):
-    """Flatten validated comparison rows into spreadsheet rows."""
+def ensure_all_headers(service, spreadsheet_id):
+    """Ensure all three tabs have correct headers in row 1."""
+    _ensure_headers(service, spreadsheet_id,
+                    REPORT_HEADER_RANGE, f"{REPORT_TAB}!A1", REPORT_HEADERS)
+    _ensure_headers(service, spreadsheet_id,
+                    SECTIONS_HEADER_RANGE, f"{SECTIONS_TAB}!A1", SECTIONS_HEADERS)
+    _ensure_headers(service, spreadsheet_id,
+                    SEO_HEADER_RANGE, f"{SEO_TAB}!A1", SEO_HEADERS)
+
+
+# ----- Row builders ------------------------------------------------------
+
+def build_report_rows(timestamp, restaurant, old_url, new_url, comparison_rows):
+    """Flatten validated comparison rows into spreadsheet rows for the report tab."""
     out = []
     for r in comparison_rows:
         out.append([
@@ -127,17 +174,64 @@ def build_sheet_rows(timestamp, restaurant, old_url, new_url, comparison_rows):
     return out
 
 
-def append_to_report(service, spreadsheet_id, rows):
+def build_sections_tab_rows(restaurant, timestamp, section_pairs):
+    """One row per paired section for the sections tab."""
+    out = []
+    for p in section_pairs:
+        out.append([
+            restaurant,
+            timestamp,
+            p.get("old_section_name", ""),
+            p.get("new_section_name", ""),
+            p.get("old_html_type", ""),
+            p.get("new_html_type", ""),
+        ])
+    return out
+
+
+def build_seo_tab_rows(restaurant, timestamp, old_data, new_data):
+    """
+    One row per restaurant run for the seo tab. H1 texts from each side are
+    joined with '; ' if multiple are present; "EMPTY" is written if none are
+    found on a side.
+    """
+    old_h1s = collect_h1_texts(old_data)
+    new_h1s = collect_h1_texts(new_data)
+    return [[
+        restaurant,
+        timestamp,
+        "; ".join(old_h1s) if old_h1s else "EMPTY",
+        "; ".join(new_h1s) if new_h1s else "EMPTY",
+    ]]
+
+
+# ----- Append helpers ----------------------------------------------------
+
+def _append(service, spreadsheet_id, sheet_range, rows):
     if not rows:
         return
     service.spreadsheets().values().append(
         spreadsheetId=spreadsheet_id,
-        range=REPORT_RANGE,
+        range=sheet_range,
         valueInputOption="RAW",
         insertDataOption="INSERT_ROWS",
         body={"values": rows},
     ).execute()
 
+
+def append_to_report(service, spreadsheet_id, rows):
+    _append(service, spreadsheet_id, REPORT_RANGE, rows)
+
+
+def append_to_sections(service, spreadsheet_id, rows):
+    _append(service, spreadsheet_id, SECTIONS_RANGE, rows)
+
+
+def append_to_seo(service, spreadsheet_id, rows):
+    _append(service, spreadsheet_id, SEO_RANGE, rows)
+
+
+# ----- Main --------------------------------------------------------------
 
 def main():
     spreadsheet_id = os.environ.get("SPREADSHEET_ID")
@@ -154,7 +248,7 @@ def main():
         return
 
     print(f"Found {len(pairs)} URL pair(s) to process.", flush=True)
-    ensure_report_headers(sheets, spreadsheet_id)
+    ensure_all_headers(sheets, spreadsheet_id)
 
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     failures = 0
@@ -169,16 +263,32 @@ def main():
                 or old_data.get("restaurant_name")
                 or "(unknown)"
             )
+
+            # ---- main report tab ----
             comparison_rows = build_validated_rows(old_data, new_data)
-            sheet_rows = build_sheet_rows(
+            report_rows = build_report_rows(
                 timestamp, restaurant, old_url, new_url, comparison_rows
             )
-            append_to_report(sheets, spreadsheet_id, sheet_rows)
+            append_to_report(sheets, spreadsheet_id, report_rows)
+
+            # ---- sections tab ----
+            section_pairs = build_section_pairs(old_data, new_data)
+            sections_rows = build_sections_tab_rows(
+                restaurant, timestamp, section_pairs
+            )
+            append_to_sections(sheets, spreadsheet_id, sections_rows)
+
+            # ---- seo tab ----
+            seo_rows = build_seo_tab_rows(
+                restaurant, timestamp, old_data, new_data
+            )
+            append_to_seo(sheets, spreadsheet_id, seo_rows)
 
             ok = sum(1 for r in comparison_rows if r.get("match") == "OK")
             issues = len(comparison_rows) - ok
-            print(f"  ✓ wrote {len(sheet_rows)} rows  "
-                  f"(OK: {ok}, issues: {issues})", flush=True)
+            print(f"  ✓ report: {len(report_rows)} rows (OK: {ok}, issues: {issues})  "
+                  f"sections: {len(sections_rows)}  seo: {len(seo_rows)}",
+                  flush=True)
         except Exception as e:
             failures += 1
             print(f"  ✗ FAILED: {e}", flush=True)

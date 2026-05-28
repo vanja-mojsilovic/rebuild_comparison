@@ -143,7 +143,68 @@ def pair_sections(old_list: list, new_list: list) -> list:
 
 
 # ------------------------------------------------------------
-# Build the flat row data for the sheet
+# Section / SEO summaries for the auxiliary sheet tabs
+# ------------------------------------------------------------
+def build_section_pairs(old_data: dict, new_data: dict) -> list:
+    """
+    One row per paired section (service + section index), used by the
+    'sections' tab in the spreadsheet. Each row is:
+
+        {
+          "service":          classified service name,
+          "section_pair":     pair index within service,
+          "old_section_name": the service name when an old section exists,
+                              else "MISSING",
+          "new_section_name": the service name when a new section exists,
+                              else "MISSING",
+          "old_html_type":    "slideshow" / "carousel" / "cover_video" /
+                              "text+image" / "",
+          "new_html_type":    same,
+        }
+    """
+    old_by_svc = group_by_service(old_data.get("sections", []))
+    new_by_svc = group_by_service(new_data.get("sections", []))
+    all_services = sorted(set(list(old_by_svc.keys()) + list(new_by_svc.keys())))
+
+    out = []
+    for service in all_services:
+        pairs = pair_sections(
+            old_by_svc.get(service, []),
+            new_by_svc.get(service, []),
+        )
+        for pair_idx, (old_sec, new_sec) in enumerate(pairs, start=1):
+            out.append({
+                "service": service,
+                "section_pair": pair_idx,
+                "old_section_name": service if old_sec is not None else "MISSING",
+                "new_section_name": service if new_sec is not None else "MISSING",
+                "old_html_type": _html_type(old_sec) if old_sec is not None else "",
+                "new_html_type": _html_type(new_sec) if new_sec is not None else "",
+            })
+    return out
+
+
+def collect_h1_texts(data: dict) -> list:
+    """
+    All H1 text values found across a site's sections, in document order
+    and deduplicated. Empty list means the site has no H1 anywhere.
+    """
+    seen = set()
+    out = []
+    for sec in data.get("sections", []):
+        for h in sec.get("h1", []):
+            cleaned = (h or "").strip()
+            if not cleaned:
+                continue
+            if cleaned in seen:
+                continue
+            seen.add(cleaned)
+            out.append(cleaned)
+    return out
+
+
+# ------------------------------------------------------------
+# Build the flat row data for the main report tab
 # ------------------------------------------------------------
 def build_validated_rows(old_data: dict, new_data: dict) -> list:
     """
