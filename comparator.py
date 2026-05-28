@@ -32,8 +32,12 @@ SERVICE_RULES = [
     ("reservations", lambda s: bool(re.search(r"reserve|reservations|book a table", s, re.I))),
     ("jobs",         lambda s: bool(re.search(r"jobs|for a job", s, re.I))),
     ("about us",     lambda s: bool(re.search(r"about us|our story", s, re.I))),
-    ("locations",    lambda s: bool(re.search(r"locations?|visit us", s, re.I))),
-    ("carousel",     lambda s: bool(re.search(r"carousel", s, re.I))),
+    ("locations",    lambda s: bool(re.search(r"locations?|visit us|find us|our location", s, re.I))),
+    ("reviews",      lambda s: bool(re.search(r"^reviews?$|customer reviews|what our|testimonials?", s, re.I))),
+    ("gallery",      lambda s: bool(re.search(r"gallery|photo gallery|photos", s, re.I))),
+    ("newsletter",   lambda s: bool(re.search(r"newsletter|sign up|subscribe", s, re.I))),
+    ("contact",      lambda s: bool(re.search(r"contact us|contact info|get in touch|hours", s, re.I))),
+    ("carousel",     lambda s: bool(re.search(r"^carousel$", s, re.I))),
 ]
 
 
@@ -162,41 +166,25 @@ def _section_label(section: dict) -> str:
     """
     A short, human-readable name for one section. Priority:
       1. Classified service name when it's not 'other' ("about us", "catering",
-         "reviews", "locations", "events", etc.)
-      2. HTML element type when service is 'other' or unknown
+         "reviews", "locations", "events", etc.) — derived from heading/button
+         text via SERVICE_RULES
+      2. Scraper-provided 'section_kind' hint when set (e.g. "gallery", "map",
+         "cover video" — useful when a section has no heading text the service
+         classifier can read)
+      3. HTML element type when neither of the above resolves
          ("cover video", "slideshow", "carousel", "text+image")
-      3. Fallback "other"
+      4. Fallback "other"
     """
     if section is None:
         return ""
     svc = classify_service(section)
     if svc and svc != "other":
         return svc
+    kind_hint = section.get("section_kind") or ""
+    if kind_hint:
+        return kind_hint
     html_type = section.get("html_element_type") or DEFAULT_HTML_TYPE
     return _HTML_TYPE_LABELS.get(html_type, "other")
-
-
-def _synthetic_reviews_section(reviews: list) -> Optional[dict]:
-    """
-    The scraper filters out top-level review-classed sections from
-    extract_sections because the main report compares reviews separately.
-    For the sections-tab listing, however, we want a row for the review
-    block when one exists. Build a stub section dict from the parsed
-    reviews list so the listing includes it.
-    """
-    if not reviews:
-        return None
-    return {
-        "h1": [], "h2": [], "h3": [],
-        "headings": [],
-        "paragraphs": [r.get("text", "") for r in reviews],
-        "list_items": [],
-        "buttons": [],
-        "html_element_type": "carousel",
-        # Service classifier won't see this stub, but _section_label
-        # will recognize it via this explicit marker.
-        "_synthetic_kind": "reviews",
-    }
 
 
 def build_section_pairs(old_data: dict, new_data: dict) -> list:
@@ -224,23 +212,12 @@ def build_section_pairs(old_data: dict, new_data: dict) -> list:
     old_sections = list(old_data.get("sections", []))
     new_sections = list(new_data.get("sections", []))
 
-    # Add a synthetic reviews section to each side if reviews were extracted
-    # separately (the scraper skips review-classed sections from extract_sections
-    # but parses the reviews themselves into data["reviews"]).
-    old_reviews = _synthetic_reviews_section(old_data.get("reviews", []))
-    new_reviews = _synthetic_reviews_section(new_data.get("reviews", []))
-    if old_reviews is not None:
-        old_sections.append(old_reviews)
-    if new_reviews is not None:
-        new_sections.append(new_reviews)
-
     out = []
     max_len = max(len(old_sections), len(new_sections))
     for i in range(max_len):
         old_sec = old_sections[i] if i < len(old_sections) else None
         new_sec = new_sections[i] if i < len(new_sections) else None
 
-        # Synthetic reviews stub uses the explicit marker, not the classifier
         old_name = _label_for(old_sec)
         new_name = _label_for(new_sec)
 
@@ -254,11 +231,9 @@ def build_section_pairs(old_data: dict, new_data: dict) -> list:
 
 
 def _label_for(section: Optional[dict]) -> str:
-    """Wrapper around _section_label that also handles synthetic stubs."""
+    """Return a short section name, or '' if section is None."""
     if section is None:
         return ""
-    if section.get("_synthetic_kind") == "reviews":
-        return "reviews"
     return _section_label(section)
 
 

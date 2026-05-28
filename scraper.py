@@ -44,12 +44,28 @@ import re
 
 
 SECTION_SELECTORS = [
+    # Specific SpotHopper section identifiers come FIRST so their selector
+    # name drives the html-type fast-paths (e.g. custom_html_1-section -> cover_video,
+    # carousel-wrapper / reviews-v2-wrapper -> carousel, gallery-v4-wrapper -> slideshow).
+    "div.custom_html_1-section",
+    "div.carousel-wrapper",
+    "div.reviews-v2-wrapper",
+    "div.gallery-v4-wrapper",
+    "div.about-us-v8-wrapper",
+    "div.googlemap-v3-wrapper",
+    "div.openstreetmap-v3-wrapper",
+    "div.maps-wrapper",
+    "div.contact-v4",
+    # Generic / WP-rebuild wrappers
     "section.wp-block-group",
     "div.text-content",
-    "div.custom_html_1-section",
+    # Legacy SpotHopper bits
     "div.uk-overlay-panel",
-    "div.carousel-wrapper",
     "div.tmt-section",
+    # Universal SpotHopper wrapper — comes LAST so it catches any top-level
+    # section we didn't identify by a more specific class. This ensures
+    # every visible block on the page is captured in document order.
+    "div.section-wrapper",
 ]
 
 HIDDEN_CLASSES = {
@@ -170,10 +186,12 @@ def _detect_html_element_type(el: Tag, matched_selector: str) -> str:
         (one of SECTION_SELECTORS).
     """
     # 1. Selector-based fast paths from SECTION_SELECTORS
-    if "carousel-wrapper" in matched_selector:
-        return "carousel"
     if "custom_html_1-section" in matched_selector:
         return "cover_video"
+    if "carousel-wrapper" in matched_selector or "reviews-v2-wrapper" in matched_selector:
+        return "carousel"
+    if "gallery-v4-wrapper" in matched_selector:
+        return "slideshow"
 
     # 2. Slideshow check first — walk ANCESTORS as well as descendants.
     #    SpotHopper's slideshow-v2-wrapper sits above the uk-overlay-panel that
@@ -344,16 +362,43 @@ def extract_sections(soup: BeautifulSoup) -> list:
 
         if el.find_parent(class_="map-newsletter"):
             continue
-        cls = " ".join(el.get("class") or [])
-        if any(x in cls for x in ("reviews", "banner", "contact")):
-            continue
+        # Note: previously we skipped any element with "reviews", "banner",
+        # or "contact" in its class list, to keep those out of the main
+        # report's element-by-element comparison. That filter was too coarse:
+        # it dropped reviews-v2-wrapper / contact-v4 sections from the
+        # sections-tab listing too. We now capture every section here; the
+        # comparator handles reviews separately via _compare_reviews so they
+        # won't be double-counted in the main report.
 
         section = _section_data(el)
         section["html_element_type"] = _detect_html_element_type(el, matched_sel)
+        section["section_kind"] = _section_kind_from_selector(matched_sel, el)
         out.append(section)
         recorded_roots.append(el)
 
     return out
+
+
+# Maps from a SpotHopper section selector to a friendly section name.
+# The label-resolution flow in comparator.py uses this when the service
+# classifier can't find a name from heading text alone (e.g. the gallery
+# wrapper has no <h2>, just images).
+_SECTION_KIND_BY_SELECTOR = {
+    "div.custom_html_1-section":   "cover video",
+    "div.carousel-wrapper":        "carousel",
+    "div.reviews-v2-wrapper":      "reviews",
+    "div.gallery-v4-wrapper":      "gallery",
+    "div.about-us-v8-wrapper":     "",  # let service classifier name this from headings
+    "div.googlemap-v3-wrapper":    "map",
+    "div.openstreetmap-v3-wrapper": "map",
+    "div.maps-wrapper":            "map",
+    "div.contact-v4":              "contact",
+}
+
+
+def _section_kind_from_selector(matched_sel: str, el: Tag) -> str:
+    """Return a friendly section name hint based on the matched selector."""
+    return _SECTION_KIND_BY_SELECTOR.get(matched_sel, "")
 
 
 def _compile_section_selector(sel: str):
