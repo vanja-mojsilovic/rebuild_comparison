@@ -44,10 +44,13 @@ import re
 
 
 SECTION_SELECTORS = [
-    # Specific SpotHopper section identifiers come FIRST so their selector
-    # name drives the html-type fast-paths (e.g. custom_html_1-section -> cover_video,
-    # carousel-wrapper / reviews-v2-wrapper -> carousel, gallery-v4-wrapper -> slideshow).
-    "div.custom_html_1-section",
+    # The actual SpotHopper cover-video container. This is the only wrapper
+    # we can reliably classify as cover_video by selector alone — the
+    # custom_html_1-section wrapper despite its name can hold anything
+    # (EGift Cards button, announcements, custom HTML the operator wrote).
+    "div#home_page_cover",
+    # Specific SpotHopper section identifiers — order matters because the
+    # selector name drives html-type fast-paths for some of these.
     "div.carousel-wrapper",
     "div.reviews-v2-wrapper",
     "div.gallery-v4-wrapper",
@@ -56,6 +59,10 @@ SECTION_SELECTORS = [
     "div.openstreetmap-v3-wrapper",
     "div.maps-wrapper",
     "div.contact-v4",
+    # custom_html_1-section is a generic "custom HTML block" wrapper —
+    # classify by its actual content (video / button / text) rather than
+    # by the selector name.
+    "div.custom_html_1-section",
     # Generic / WP-rebuild wrappers
     "section.wp-block-group",
     "div.text-content",
@@ -186,7 +193,9 @@ def _detect_html_element_type(el: Tag, matched_selector: str) -> str:
         (one of SECTION_SELECTORS).
     """
     # 1. Selector-based fast paths from SECTION_SELECTORS
-    if "custom_html_1-section" in matched_selector:
+    # home_page_cover is the ONLY wrapper that reliably means cover_video.
+    # Everything else is decided by what's actually inside the element.
+    if "home_page_cover" in matched_selector:
         return "cover_video"
     if "carousel-wrapper" in matched_selector or "reviews-v2-wrapper" in matched_selector:
         return "carousel"
@@ -384,7 +393,7 @@ def extract_sections(soup: BeautifulSoup) -> list:
 # classifier can't find a name from heading text alone (e.g. the gallery
 # wrapper has no <h2>, just images).
 _SECTION_KIND_BY_SELECTOR = {
-    "div.custom_html_1-section":   "cover video",
+    "div#home_page_cover":         "cover video",
     "div.carousel-wrapper":        "carousel",
     "div.reviews-v2-wrapper":      "reviews",
     "div.gallery-v4-wrapper":      "gallery",
@@ -393,6 +402,8 @@ _SECTION_KIND_BY_SELECTOR = {
     "div.openstreetmap-v3-wrapper": "map",
     "div.maps-wrapper":            "map",
     "div.contact-v4":              "contact",
+    # custom_html_1-section is a generic container; do not hardcode a kind.
+    "div.custom_html_1-section":   "",
 }
 
 
@@ -407,7 +418,20 @@ def _compile_section_selector(sel: str):
     Supports the shapes used in SECTION_SELECTORS:
         "section.wp-block-group"   tag + class
         "div.text-content"         tag + class
+        "div#home_page_cover"      tag + id
+        "div"                      tag only
     """
+    if "#" in sel:
+        tag_name, id_name = sel.split("#", 1)
+        tag_name = tag_name.strip() or None
+        id_name = id_name.strip()
+
+        def _pred_id(el: Tag) -> bool:
+            if tag_name and el.name != tag_name:
+                return False
+            return el.get("id") == id_name
+        return _pred_id
+
     if "." in sel:
         tag_name, class_name = sel.split(".", 1)
         tag_name = tag_name.strip() or None
