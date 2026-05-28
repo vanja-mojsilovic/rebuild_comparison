@@ -302,28 +302,92 @@ def _is_hidden_anywhere(node) -> bool:
 
 
 def extract_sections(soup: BeautifulSoup) -> list:
-    """Walk the document in order and pull every section-like container."""
-    seen_ids = set()
+    """
+    Walk the document tree ONCE in document order and pull every section-like
+    container. The earlier implementation iterated SECTION_SELECTORS one at a
+    time (all wp-block-groups, then all text-contents, ...), which broke the
+    on-page order — a cover_video block at the top of the page could end up
+    listed after several wp-block-groups that visually appeared below it.
+
+    Here we do a single descendant walk. For each element we check whether it
+    matches ANY of the section selectors; if so it becomes a section. We also
+    record which selector matched first so the html-type classifier can use
+    the selector-based fast path.
+
+    A section nested inside another already-recorded section is skipped to
+    avoid double-counting (e.g. a uk-overlay-panel inside a carousel-wrapper).
+    """
     out = []
+    recorded_roots = []  # list of Tag objects already added
 
-    for selector in SECTION_SELECTORS:
-        for el in soup.select(selector):
-            key = id(el)
-            if key in seen_ids:
-                continue
-            seen_ids.add(key)
+    # Pre-compute the class-token and tag predicates for each selector so we
+    # can match against a single element cheaply.
+    matchers = []
+    for sel in SECTION_SELECTORS:
+        matchers.append((sel, _compile_section_selector(sel)))
 
-            if el.find_parent(class_="map-newsletter"):
-                continue
-            cls = " ".join(el.get("class") or [])
-            if any(x in cls for x in ("reviews", "banner", "contact")):
-                continue
+    for el in soup.descendants:
+        if not isinstance(el, Tag):
+            continue
 
-            section = _section_data(el)
-            section["html_element_type"] = _detect_html_element_type(el, selector)
-            out.append(section)
+        matched_sel = None
+        for sel, predicate in matchers:
+            if predicate(el):
+                matched_sel = sel
+                break
+        if matched_sel is None:
+            continue
+
+        # Skip if this element sits inside one we've already recorded
+        if any(_is_descendant_of(el, root) for root in recorded_roots):
+            continue
+
+        if el.find_parent(class_="map-newsletter"):
+            continue
+        cls = " ".join(el.get("class") or [])
+        if any(x in cls for x in ("reviews", "banner", "contact")):
+            continue
+
+        section = _section_data(el)
+        section["html_element_type"] = _detect_html_element_type(el, matched_sel)
+        out.append(section)
+        recorded_roots.append(el)
 
     return out
+
+
+def _compile_section_selector(sel: str):
+    """
+    Build a predicate function that returns True for a Tag matching `sel`.
+    Supports the shapes used in SECTION_SELECTORS:
+        "section.wp-block-group"   tag + class
+        "div.text-content"         tag + class
+    """
+    if "." in sel:
+        tag_name, class_name = sel.split(".", 1)
+        tag_name = tag_name.strip() or None
+        class_name = class_name.strip()
+
+        def _pred(el: Tag) -> bool:
+            if tag_name and el.name != tag_name:
+                return False
+            return class_name in (el.get("class") or [])
+        return _pred
+
+    # Plain tag selector fallback
+    def _pred_tag(el: Tag) -> bool:
+        return el.name == sel
+    return _pred_tag
+
+
+def _is_descendant_of(el: Tag, root: Tag) -> bool:
+    """True if `el` is somewhere inside `root` in the document tree."""
+    cursor = el.parent
+    while cursor is not None:
+        if cursor is root:
+            return True
+        cursor = cursor.parent
+    return False
 
 
 def _section_data(el: Tag) -> dict:
