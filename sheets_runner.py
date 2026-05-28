@@ -25,7 +25,7 @@ from scraper import scrape_page
 from comparator import (
     build_validated_rows,
     build_section_pairs,
-    collect_h1_texts,
+    summarize_h1,
 )
 
 
@@ -78,12 +78,16 @@ SECTIONS_HEADER_RANGE = f"{SECTIONS_TAB}!A1:F1"
 SEO_HEADERS = [
     "Restaurant name",
     "Run timestamp",
-    "Old site H1",
-    "New site H1",
+    "Old H1 status",
+    "Old H1 text",
+    "Old H1 visibility",
+    "New H1 status",
+    "New H1 text",
+    "New H1 visibility",
 ]
-# SEO tab spans 4 columns → A:D
-SEO_RANGE = f"{SEO_TAB}!A:D"
-SEO_HEADER_RANGE = f"{SEO_TAB}!A1:D1"
+# SEO tab spans 8 columns → A:H
+SEO_RANGE = f"{SEO_TAB}!A:H"
+SEO_HEADER_RANGE = f"{SEO_TAB}!A1:H1"
 
 
 def get_sheets_service():
@@ -191,17 +195,32 @@ def build_sections_tab_rows(restaurant, timestamp, section_pairs):
 
 def build_seo_tab_rows(restaurant, timestamp, old_data, new_data):
     """
-    One row per restaurant run for the seo tab. H1 texts from each side are
-    joined with '; ' if multiple are present; "EMPTY" is written if none are
-    found on a side.
+    One row per restaurant run for the seo tab.
+
+    For each side (old / new) we emit three columns:
+      - H1 status:     "text" / "empty" / "missing"
+      - H1 text:       joined text of all non-empty H1s on that side (or "")
+      - H1 visibility: "visible" / "hidden" / "mixed" / ""
+
+    "missing" means no <h1> tag exists on the page at all.
+    "empty" means an <h1> tag exists but has no text content.
+    "text" means at least one <h1> with non-empty text exists.
+
+    The visibility flag is "" when status is "missing", and otherwise
+    reflects whether the H1 element (or any of its ancestors) is hidden
+    via class, inline style, aria-hidden, or the hidden attribute.
     """
-    old_h1s = collect_h1_texts(old_data)
-    new_h1s = collect_h1_texts(new_data)
+    old_h1 = summarize_h1(old_data)
+    new_h1 = summarize_h1(new_data)
     return [[
         restaurant,
         timestamp,
-        "; ".join(old_h1s) if old_h1s else "EMPTY",
-        "; ".join(new_h1s) if new_h1s else "EMPTY",
+        old_h1["status"],
+        old_h1["text"],
+        old_h1["visibility"],
+        new_h1["status"],
+        new_h1["text"],
+        new_h1["visibility"],
     ]]
 
 

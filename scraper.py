@@ -245,7 +245,60 @@ def parse_html(html: str, base_url: str = "") -> dict:
         "identity": extract_identity(soup),
         "reviews": extract_reviews(soup),
         "all_links": collect_all_links(soup),
+        "page_h1s": extract_page_h1s(soup),
     }
+
+
+def extract_page_h1s(soup: BeautifulSoup) -> list:
+    """
+    Find every <h1> on the page, regardless of visibility, section membership,
+    or whether it sits inside an interactive element.
+
+    Returns a list of dicts:
+        [{"text": "...", "visible": True/False, "empty": True/False}, ...]
+
+    - text:    cleaned text content (may be "" if the tag is empty)
+    - visible: False if the element OR any ancestor is hidden via class,
+               inline style, or aria-hidden; True otherwise
+    - empty:   True if the tag exists but has no non-whitespace text content
+
+    This is used by the SEO summary so we can tell apart three states:
+      missing  — no <h1> tag found anywhere on the page
+      empty    — <h1> tag exists but is text-empty
+      text     — <h1> tag exists and has text content
+    """
+    out = []
+    for tag in soup.find_all("h1"):
+        text = _clean_text(tag.get_text())
+        out.append({
+            "text": text,
+            "visible": not _is_hidden_anywhere(tag),
+            "empty": text == "",
+        })
+    return out
+
+
+def _is_hidden_anywhere(node) -> bool:
+    """
+    True if `node` or any of its ancestors is hidden via:
+      - a known visually-hidden class
+      - aria-hidden="true"
+      - inline style: display:none or visibility:hidden
+      - the `hidden` HTML attribute
+    """
+    cursor = node
+    while cursor is not None and isinstance(cursor, Tag):
+        if _is_visually_hidden(cursor):
+            return True
+        if cursor.get("aria-hidden", "").lower() == "true":
+            return True
+        if cursor.has_attr("hidden"):
+            return True
+        style = (cursor.get("style") or "").lower().replace(" ", "")
+        if "display:none" in style or "visibility:hidden" in style:
+            return True
+        cursor = cursor.parent
+    return False
 
 
 def extract_sections(soup: BeautifulSoup) -> list:
