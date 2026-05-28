@@ -145,62 +145,179 @@ def pair_sections(old_list: list, new_list: list) -> list:
 # ------------------------------------------------------------
 # Section / SEO summaries for the auxiliary sheet tabs
 # ------------------------------------------------------------
+
+# Descriptive labels used in the sections tab, derived from a section's
+# classified service AND its HTML element type. The HTML type wins when the
+# service classifier returns "other" — e.g. a hero cover_video block doesn't
+# have a service keyword, but its visual identity is clearly "cover video".
+_HTML_TYPE_LABELS = {
+    "slideshow":   "slideshow",
+    "carousel":    "carousel",
+    "cover_video": "cover video",
+    "text+image":  "text+image",
+}
+
+
+def _section_label(section: dict) -> str:
+    """
+    A short, human-readable name for one section. Priority:
+      1. Classified service name when it's not 'other' ("about us", "catering",
+         "reviews", "locations", "events", etc.)
+      2. HTML element type when service is 'other' or unknown
+         ("cover video", "slideshow", "carousel", "text+image")
+      3. Fallback "other"
+    """
+    if section is None:
+        return ""
+    svc = classify_service(section)
+    if svc and svc != "other":
+        return svc
+    html_type = section.get("html_element_type") or DEFAULT_HTML_TYPE
+    return _HTML_TYPE_LABELS.get(html_type, "other")
+
+
+def _synthetic_reviews_section(reviews: list) -> Optional[dict]:
+    """
+    The scraper filters out top-level review-classed sections from
+    extract_sections because the main report compares reviews separately.
+    For the sections-tab listing, however, we want a row for the review
+    block when one exists. Build a stub section dict from the parsed
+    reviews list so the listing includes it.
+    """
+    if not reviews:
+        return None
+    return {
+        "h1": [], "h2": [], "h3": [],
+        "headings": [],
+        "paragraphs": [r.get("text", "") for r in reviews],
+        "list_items": [],
+        "buttons": [],
+        "html_element_type": "carousel",
+        # Service classifier won't see this stub, but _section_label
+        # will recognize it via this explicit marker.
+        "_synthetic_kind": "reviews",
+    }
+
+
 def build_section_pairs(old_data: dict, new_data: dict) -> list:
     """
-    One row per paired section (service + section index), used by the
-    'sections' tab in the spreadsheet. Each row is:
+    One row per section, for the 'sections' tab. Pairs old and new
+    sections positionally in document order, so missing sections on
+    either side surface clearly.
 
+    Each row:
         {
-          "service":          classified service name,
-          "section_pair":     pair index within service,
-          "old_section_name": the service name when an old section exists,
-                              else "MISSING",
-          "new_section_name": the service name when a new section exists,
-                              else "MISSING",
+          "old_section_name": e.g. "about us", "reviews", "cover video",
+                              "slideshow", "carousel", "text+image",
+                              or "MISSING",
+          "new_section_name": same,
           "old_html_type":    "slideshow" / "carousel" / "cover_video" /
                               "text+image" / "",
           "new_html_type":    same,
         }
+
+    Unlike build_validated_rows (which groups by service for content
+    comparison), this listing aims to be exhaustive: every visual block
+    on either side gets a row, including cover videos, custom HTML
+    sections, galleries, reviews, locations, etc.
     """
-    old_by_svc = group_by_service(old_data.get("sections", []))
-    new_by_svc = group_by_service(new_data.get("sections", []))
-    all_services = sorted(set(list(old_by_svc.keys()) + list(new_by_svc.keys())))
+    old_sections = list(old_data.get("sections", []))
+    new_sections = list(new_data.get("sections", []))
+
+    # Add a synthetic reviews section to each side if reviews were extracted
+    # separately (the scraper skips review-classed sections from extract_sections
+    # but parses the reviews themselves into data["reviews"]).
+    old_reviews = _synthetic_reviews_section(old_data.get("reviews", []))
+    new_reviews = _synthetic_reviews_section(new_data.get("reviews", []))
+    if old_reviews is not None:
+        old_sections.append(old_reviews)
+    if new_reviews is not None:
+        new_sections.append(new_reviews)
 
     out = []
-    for service in all_services:
-        pairs = pair_sections(
-            old_by_svc.get(service, []),
-            new_by_svc.get(service, []),
-        )
-        for pair_idx, (old_sec, new_sec) in enumerate(pairs, start=1):
-            out.append({
-                "service": service,
-                "section_pair": pair_idx,
-                "old_section_name": service if old_sec is not None else "MISSING",
-                "new_section_name": service if new_sec is not None else "MISSING",
-                "old_html_type": _html_type(old_sec) if old_sec is not None else "",
-                "new_html_type": _html_type(new_sec) if new_sec is not None else "",
-            })
+    max_len = max(len(old_sections), len(new_sections))
+    for i in range(max_len):
+        old_sec = old_sections[i] if i < len(old_sections) else None
+        new_sec = new_sections[i] if i < len(new_sections) else None
+
+        # Synthetic reviews stub uses the explicit marker, not the classifier
+        old_name = _label_for(old_sec)
+        new_name = _label_for(new_sec)
+
+        out.append({
+            "old_section_name": old_name if old_sec is not None else "MISSING",
+            "new_section_name": new_name if new_sec is not None else "MISSING",
+            "old_html_type": _html_type(old_sec) if old_sec is not None else "",
+            "new_html_type": _html_type(new_sec) if new_sec is not None else "",
+        })
     return out
 
 
-def collect_h1_texts(data: dict) -> list:
+def _label_for(section: Optional[dict]) -> str:
+    """Wrapper around _section_label that also handles synthetic stubs."""
+    if section is None:
+        return ""
+    if section.get("_synthetic_kind") == "reviews":
+        return "reviews"
+    return _section_label(section)
+
+
+def summarize_h1(data: dict) -> dict:
     """
-    All H1 text values found across a site's sections, in document order
-    and deduplicated. Empty list means the site has no H1 anywhere.
+    SEO summary of a page's <h1> usage. Looks at every <h1> on the page,
+    regardless of section membership or visibility, and returns:
+
+        {
+          "status":     "text" / "empty" / "missing"
+                        text    = at least one <h1> with non-empty text
+                        empty   = at least one <h1> tag exists but all are
+                                  text-empty
+                        missing = no <h1> tag found anywhere on the page
+          "text":       joined text content of all non-empty H1s; "" if
+                        status is "empty" or "missing"
+          "visibility": "visible" / "hidden" / "mixed" / ""
+                        visible = all H1s are visible
+                        hidden  = all H1s are hidden via class / inline style
+                                  / aria-hidden / hidden attribute
+                        mixed   = some visible, some hidden
+                        ""      = status is "missing"
+        }
     """
-    seen = set()
-    out = []
-    for sec in data.get("sections", []):
-        for h in sec.get("h1", []):
-            cleaned = (h or "").strip()
-            if not cleaned:
-                continue
-            if cleaned in seen:
-                continue
-            seen.add(cleaned)
-            out.append(cleaned)
-    return out
+    h1s = data.get("page_h1s", [])
+
+    if not h1s:
+        return {"status": "missing", "text": "", "visibility": ""}
+
+    with_text = [h for h in h1s if not h.get("empty")]
+
+    if not with_text:
+        # tags exist but all text-empty
+        any_visible = any(h.get("visible") for h in h1s)
+        all_visible = all(h.get("visible") for h in h1s)
+        if all_visible:
+            vis = "visible"
+        elif any_visible:
+            vis = "mixed"
+        else:
+            vis = "hidden"
+        return {"status": "empty", "text": "", "visibility": vis}
+
+    # At least one H1 with text — visibility describes the H1s with text only,
+    # since that's what matters for SEO ranking.
+    any_visible = any(h.get("visible") for h in with_text)
+    all_visible = all(h.get("visible") for h in with_text)
+    if all_visible:
+        vis = "visible"
+    elif any_visible:
+        vis = "mixed"
+    else:
+        vis = "hidden"
+
+    return {
+        "status": "text",
+        "text": "; ".join(h["text"] for h in with_text),
+        "visibility": vis,
+    }
 
 
 # ------------------------------------------------------------
