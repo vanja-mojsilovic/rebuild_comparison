@@ -73,6 +73,10 @@ DEFAULT_HTML_TYPE = "text+image"
 def classify_service(section: dict) -> str:
     """
     Classify a section using, in priority order:
+      0. an AI-supplied label written onto the section as section["ai_service"]
+         (this overrides everything else because the AI sees headings + buttons
+         + paragraphs + hrefs together in context, and is by definition the
+         single source of truth across the report and sections tabs)
       1. button visible text + the section's unified headings (h1+h2+h3)
       2. button hrefs (URL slugs like /parties, /catering, /private-events
          catch rebranded sections where the heading text doesn't contain
@@ -80,7 +84,14 @@ def classify_service(section: dict) -> str:
       3. paragraph text as a last resort (a "party" mention in copy)
 
     Returns the first matching service name, or "other" if nothing matches.
+    The AI label is normalized to underscore-free lowercase so it lines up
+    with the regex-based label set (e.g. "Cover Video" -> "cover video").
     """
+    # 0. AI label takes precedence when present
+    ai = (section.get("ai_service") or "").strip().lower()
+    if ai:
+        return ai
+
     button_texts = [b["text"] for b in section.get("buttons", []) if b.get("text")]
     headings = section.get("headings", [])
     # Primary signals: things the visitor actually sees as labels

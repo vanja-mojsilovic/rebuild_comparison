@@ -328,6 +328,30 @@ def main():
                 or "(unknown)"
             )
 
+            # ---- AI section classification (runs FIRST so its labels feed
+            #      both the report tab's Service column and the sections tab's
+            #      section-name columns). Returns {} if the API key is missing
+            #      or anything goes wrong, in which case the regex classifier
+            #      provides the labels and the AI columns just stay empty.
+            ai_labels = classify_sections_pair(
+                restaurant,
+                old_data.get("sections", []),
+                new_data.get("sections", []),
+            )
+
+            # Inject AI labels onto each section dict so classify_service()
+            # in the comparator picks them up automatically — this routes
+            # the AI's label through every downstream step (service grouping,
+            # section pairing, section name resolution) consistently.
+            for idx, sec in enumerate(old_data.get("sections", [])):
+                lbl = ai_labels.get(f"old_{idx}")
+                if lbl:
+                    sec["ai_service"] = lbl
+            for idx, sec in enumerate(new_data.get("sections", [])):
+                lbl = ai_labels.get(f"new_{idx}")
+                if lbl:
+                    sec["ai_service"] = lbl
+
             # ---- main report tab ----
             comparison_rows = build_validated_rows(old_data, new_data)
             report_rows = build_report_rows(
@@ -337,16 +361,6 @@ def main():
 
             # ---- sections tab ----
             section_pairs = build_section_pairs(old_data, new_data)
-
-            # Optional AI-determined section types. Returns {} if the API
-            # key is missing or anything goes wrong — in that case the AI
-            # columns will simply stay empty.
-            ai_labels = classify_sections_pair(
-                restaurant,
-                old_data.get("sections", []),
-                new_data.get("sections", []),
-            )
-
             sections_rows = build_sections_tab_rows(
                 restaurant, timestamp, section_pairs, ai_labels=ai_labels
             )

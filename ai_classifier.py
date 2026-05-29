@@ -143,11 +143,33 @@ Use these definitions:
 - "header"        top-of-page navigation
 - "hero"          hero banner without video
 - "text+image"    a generic info block with no specific service intent
-- "other"         truly doesn't fit anything above
 
 Each section is described by its heading text, paragraph text, and the visible
-plus hidden text of any buttons or links inside it. Pick the label that best
-describes the section's PURPOSE, not its visual styling.
+plus hidden text of any buttons or links inside it, ALONG WITH each button's
+href attribute.
+
+IMPORTANT — use the button hrefs as a strong signal. URL slugs survive rebrands
+even when the visible labels change. Examples:
+  - /parties, /private-events, /private-dining     → "parties"
+  - /catering, /catering-inquiry                    → "catering"
+  - /reserve, /reservations, opentable.com/...      → "reservations"
+  - /menu, qrco.de/...menu                          → "food menu"
+  - /drinks, /cocktails, /wine-list                 → "drink menu"
+  - /order, /pickup, /delivery, toasttab.com/online → "online order"
+  - /events, /calendar, /live-music                 → "events"
+  - /jobs, /careers, /hiring                        → "jobs"
+  - /about, /our-story                              → "about us"
+  - /gift-cards, /giftcards, toasttab.com/giftcards → "gift cards"
+  - /contact, mailto:, tel:                         → "contact"
+  - facebook.com, instagram.com, google.com/maps    → "contact"
+
+When the heading and button hrefs disagree, the hrefs usually win — a heading
+"Private Events" with a button to /parties is the "parties" section, and a
+heading "a/stir Restaurant" with buttons to /menu, /giftcards, /order is an
+"about us" section even though the buttons cover several services (because
+the BLOCK's primary purpose is the brand intro — see the heading).
+
+Pick the label that best describes the section's PURPOSE, not its styling.
 
 Sections:
 {payload_json}
