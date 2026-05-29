@@ -400,6 +400,24 @@ def extract_sections(soup: BeautifulSoup) -> list:
         # comparator handles reviews separately via _compare_reviews so they
         # won't be double-counted in the main report.
 
+        # SpotHopper's about-us-v8 template often lays out multiple visually-
+        # distinct blocks as sibling <section> elements inside one wrapper:
+        #   about-us-v8-wrapper > .container.about-us-v8 > section, section, ...
+        # Each child section is a separate visual block (e.g. main "about us",
+        # then "parties", then "downstairs") with its own heading and CTA, so
+        # we emit one section dict per child rather than collapsing them.
+        # The wrapper itself is still added to recorded_roots so the catch-all
+        # div.section-wrapper selector doesn't re-match it.
+        exploded = _explode_multi_section_wrapper(el, matched_sel)
+        if exploded:
+            for child in exploded:
+                child_section = _section_data(child)
+                child_section["html_element_type"] = _detect_html_element_type(child, matched_sel)
+                child_section["section_kind"] = _section_kind_from_selector(matched_sel, child)
+                out.append(child_section)
+            recorded_roots.append(el)
+            continue
+
         section = _section_data(el)
         section["html_element_type"] = _detect_html_element_type(el, matched_sel)
         section["section_kind"] = _section_kind_from_selector(matched_sel, el)
@@ -407,6 +425,31 @@ def extract_sections(soup: BeautifulSoup) -> list:
         recorded_roots.append(el)
 
     return out
+
+
+def _explode_multi_section_wrapper(el: Tag, matched_sel: str) -> list:
+    """
+    If `el` is a SpotHopper about-us-v8 wrapper containing multiple sibling
+    <section> children laying out distinct visual blocks, return those child
+    sections as a list (so each one becomes a separate section row).
+
+    Returns [] when:
+      - the wrapper is not about-us-v8-wrapper, or
+      - the wrapper only contains zero or one child section (no need to explode)
+    """
+    if "about-us-v8-wrapper" not in matched_sel:
+        return []
+
+    # The template structure is:
+    #   div.about-us-v8-wrapper > div.container.about-us-v8 > section, section, ...
+    container = el.find("div", class_="about-us-v8")
+    if container is None:
+        return []
+    children = container.find_all("section", recursive=False)
+    if len(children) <= 1:
+        # One or none — nothing to explode; let the wrapper become the section.
+        return []
+    return children
 
 
 # Maps from a SpotHopper section selector to a friendly section name.
