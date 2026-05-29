@@ -52,7 +52,6 @@ REPORT_HEADERS = [
     "Old URL",
     "New URL",
     "Service",
-    "Section pair",
     "Old element",
     "Old text",
     "Old href",
@@ -65,9 +64,9 @@ REPORT_HEADERS = [
     "New HTML type",
     "Match",
 ]
-# Report tab spans 17 columns → A:Q
-REPORT_RANGE = f"{REPORT_TAB}!A:Q"
-REPORT_HEADER_RANGE = f"{REPORT_TAB}!A1:Q1"
+# Report tab spans 16 columns → A:P
+REPORT_RANGE = f"{REPORT_TAB}!A:P"
+REPORT_HEADER_RANGE = f"{REPORT_TAB}!A1:P1"
 
 
 SECTIONS_HEADERS = [
@@ -191,7 +190,6 @@ def build_report_rows(timestamp, restaurant, old_url, new_url, comparison_rows):
             old_url,
             new_url,
             r.get("service", ""),
-            r.get("section_pair", ""),
             r.get("old_element", ""),
             r.get("old_text", ""),
             r.get("old_href", ""),
@@ -372,7 +370,7 @@ def main():
             traceback.print_exc()
             append_to_report(sheets, spreadsheet_id, [[
                 timestamp, "(error)", old_url, new_url,
-                "error", "", "", str(e)[:500], "", "", "", "", "", "", "", "", "ERROR",
+                "error", "", str(e)[:500], "", "", "", "", "", "", "", "", "ERROR",
             ]])
 
     print(f"\nDone. {len(pairs) - failures} succeeded, {failures} failed.")

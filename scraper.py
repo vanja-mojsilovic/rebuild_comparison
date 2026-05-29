@@ -310,18 +310,29 @@ def extract_page_h1s(soup: BeautifulSoup) -> list:
 def _is_hidden_anywhere(node) -> bool:
     """
     True if `node` or any of its ancestors is hidden via:
-      - a known visually-hidden class
+      - a known visually-hidden class (sr-only, visually-hidden, etc.)
+      - a structurally-hidden class (.hidden, .d-none, .invisible)
       - aria-hidden="true"
       - inline style: display:none or visibility:hidden
       - the `hidden` HTML attribute
+      - SpotHopper's data-hidden="yes" toggle (used on .hide-show-section
+        wrappers when the operator hid a section through the admin UI)
     """
     cursor = node
     while cursor is not None and isinstance(cursor, Tag):
         if _is_visually_hidden(cursor):
             return True
+        # Structurally-hidden classes (Bootstrap d-none, generic .hidden, .invisible)
+        cls = cursor.get("class") or []
+        if any(c in ("hidden", "d-none", "invisible") for c in cls):
+            return True
         if cursor.get("aria-hidden", "").lower() == "true":
             return True
         if cursor.has_attr("hidden"):
+            return True
+        # SpotHopper section toggle: <article data-hidden="yes"> means the
+        # operator chose to hide this whole block.
+        if (cursor.get("data-hidden") or "").lower() == "yes":
             return True
         style = (cursor.get("style") or "").lower().replace(" ", "")
         if "display:none" in style or "visibility:hidden" in style:
@@ -373,6 +384,14 @@ def extract_sections(soup: BeautifulSoup) -> list:
 
         if el.find_parent(class_="map-newsletter"):
             continue
+
+        # Skip sections that are hidden from the user — operators sometimes
+        # leave a SpotHopper block in the HTML but toggle data-hidden="yes"
+        # to hide it from the live page. Comparing those would show false
+        # differences for content that isn't actually visible.
+        if _is_hidden_anywhere(el):
+            continue
+
         # Note: previously we skipped any element with "reviews", "banner",
         # or "contact" in its class list, to keep those out of the main
         # report's element-by-element comparison. That filter was too coarse:
