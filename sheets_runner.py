@@ -26,6 +26,7 @@ from scraper import scrape_page
 from comparator import (
     build_validated_rows,
     build_section_pairs,
+    build_h1_pairs,
     summarize_h1,
 )
 from ai_classifier import classify_sections_pair
@@ -238,33 +239,48 @@ def build_sections_tab_rows(restaurant, timestamp, section_pairs, ai_labels=None
 
 def build_seo_tab_rows(restaurant, timestamp, old_data, new_data):
     """
-    One row per restaurant run for the seo tab.
+    One row per <h1> for the seo tab. Each row pairs the i-th h1 on the old
+    site with the i-th h1 on the new site (positional pairing in document
+    order). When the two sides have different h1 counts, extra rows show
+    "MISSING" on the absent side.
 
-    For each side (old / new) we emit three columns:
-      - H1 status:     "text" / "empty" / "missing"
-      - H1 text:       joined text of all non-empty H1s on that side (or "")
-      - H1 visibility: "visible" / "hidden" / "mixed" / ""
+    Columns per row:
+      Old H1 status      "text" / "empty" / "MISSING"
+      Old H1 text        the h1's text content ("" when status != "text")
+      Old H1 visibility  "visible" / "hidden" / ""  (empty when MISSING)
+      New H1 status      same shape as Old H1 status
+      New H1 text        same
+      New H1 visibility  same
 
-    "missing" means no <h1> tag exists on the page at all.
-    "empty" means an <h1> tag exists but has no text content.
-    "text" means at least one <h1> with non-empty text exists.
-
-    The visibility flag is "" when status is "missing", and otherwise
-    reflects whether the H1 element (or any of its ancestors) is hidden
-    via class, inline style, aria-hidden, or the hidden attribute.
+    When neither side has any h1, a single placeholder row is emitted so
+    reviewers see that the restaurant ran but had no h1 on either side,
+    rather than the row silently disappearing.
     """
-    old_h1 = summarize_h1(old_data)
-    new_h1 = summarize_h1(new_data)
-    return [[
-        restaurant,
-        timestamp,
-        old_h1["status"],
-        old_h1["text"],
-        old_h1["visibility"],
-        new_h1["status"],
-        new_h1["text"],
-        new_h1["visibility"],
-    ]]
+    pairs = build_h1_pairs(old_data, new_data)
+
+    # Edge case: no h1 anywhere on either side. Emit one explanatory row
+    # so the seo tab still records that this restaurant was processed.
+    if not pairs:
+        return [[
+            restaurant,
+            timestamp,
+            "MISSING", "", "",
+            "MISSING", "", "",
+        ]]
+
+    out = []
+    for p in pairs:
+        out.append([
+            restaurant,
+            timestamp,
+            p["old_h1_status"],
+            p["old_h1_text"],
+            p["old_h1_visibility"],
+            p["new_h1_status"],
+            p["new_h1_text"],
+            p["new_h1_visibility"],
+        ])
+    return out
 
 
 # ----- Append helpers ----------------------------------------------------

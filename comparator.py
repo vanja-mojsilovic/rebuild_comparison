@@ -311,6 +311,74 @@ def _label_for(section: Optional[dict]) -> str:
     return _section_label(section)
 
 
+def build_h1_pairs(old_data: dict, new_data: dict) -> list:
+    """
+    Pair every <h1> on the old site with every <h1> on the new site,
+    positionally in document order. Used by the 'seo' tab to give each
+    H1 its own row for side-by-side SEO review.
+
+    Each row dict contains:
+        {
+          "old_h1_text":       the H1's text content ("" when missing or empty)
+          "old_h1_status":     "text" / "empty" / "MISSING"
+                               text    = h1 exists and has text content
+                               empty   = h1 element exists but is text-empty
+                               MISSING = no h1 at this slot on the old side
+          "old_h1_visibility": "visible" / "hidden" / ""
+                               (empty when MISSING)
+          "new_h1_text":       same shape as old_h1_text, for the new side
+          "new_h1_status":     same
+          "new_h1_visibility": same
+        }
+
+    Pairing strategy: positional. The i-th h1 on the old side is paired
+    with the i-th h1 on the new side. When the two sides have different
+    counts, the extra rows show MISSING on the absent side. Rebuilds
+    typically preserve section order, so positional pairing makes
+    misalignment easy to spot.
+    """
+    old_h1s = list(old_data.get("page_h1s", []))
+    new_h1s = list(new_data.get("page_h1s", []))
+
+    out = []
+    max_len = max(len(old_h1s), len(new_h1s))
+    for i in range(max_len):
+        old_h = old_h1s[i] if i < len(old_h1s) else None
+        new_h = new_h1s[i] if i < len(new_h1s) else None
+
+        out.append({
+            "old_h1_text":       _h1_text(old_h),
+            "old_h1_status":     _h1_status(old_h),
+            "old_h1_visibility": _h1_visibility(old_h),
+            "new_h1_text":       _h1_text(new_h),
+            "new_h1_status":     _h1_status(new_h),
+            "new_h1_visibility": _h1_visibility(new_h),
+        })
+
+    return out
+
+
+def _h1_text(h: Optional[dict]) -> str:
+    """Return the H1's text, or '' when the slot is empty/missing."""
+    if not h:
+        return ""
+    return h.get("text", "") or ""
+
+
+def _h1_status(h: Optional[dict]) -> str:
+    """Per-H1 status: 'text' / 'empty' / 'MISSING'."""
+    if not h:
+        return "MISSING"
+    return "empty" if h.get("empty") else "text"
+
+
+def _h1_visibility(h: Optional[dict]) -> str:
+    """Per-H1 visibility: 'visible' / 'hidden' / ''."""
+    if not h:
+        return ""
+    return "visible" if h.get("visible") else "hidden"
+
+
 def summarize_h1(data: dict) -> dict:
     """
     SEO summary of a page's <h1> usage. Looks at every <h1> on the page,
