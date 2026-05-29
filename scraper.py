@@ -55,6 +55,8 @@ SECTION_SELECTORS = [
     "div.reviews-v2-wrapper",
     "div.gallery-v4-wrapper",
     "div.about-us-v8-wrapper",
+    "div.reservations-wrapper",
+    "div.ot-reservations-wrapper",
     "div.googlemap-v3-wrapper",
     "div.openstreetmap-v3-wrapper",
     "div.maps-wrapper",
@@ -398,6 +400,8 @@ _SECTION_KIND_BY_SELECTOR = {
     "div.reviews-v2-wrapper":      "reviews",
     "div.gallery-v4-wrapper":      "gallery",
     "div.about-us-v8-wrapper":     "",  # let service classifier name this from headings
+    "div.reservations-wrapper":    "reservations",
+    "div.ot-reservations-wrapper": "reservations",
     "div.googlemap-v3-wrapper":    "map",
     "div.openstreetmap-v3-wrapper": "map",
     "div.maps-wrapper":            "map",
