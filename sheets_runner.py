@@ -162,6 +162,23 @@ def ensure_all_headers(service, spreadsheet_id):
                     SEO_HEADER_RANGE, f"{SEO_TAB}!A1", SEO_HEADERS)
 
 
+def clear_data_rows(service, spreadsheet_id):
+    """
+    Wipe every row below the header (row 1) in each result tab BEFORE the
+    run appends new data, so each run produces a clean snapshot rather than
+    appending to old runs. The header row itself is left untouched.
+
+    Uses values.clear on the tab name with no row 1 — Sheets interprets the
+    tab-only reference as "all data in the tab" and clear leaves no choice
+    of starting row, so we use an explicit "A2:" range per tab to skip row 1.
+    """
+    for tab in (REPORT_TAB, SECTIONS_TAB, SEO_TAB):
+        service.spreadsheets().values().clear(
+            spreadsheetId=spreadsheet_id,
+            range=f"{tab}!A2:ZZ",
+        ).execute()
+
+
 # ----- Row builders ------------------------------------------------------
 
 def build_report_rows(timestamp, restaurant, old_url, new_url, comparison_rows):
@@ -296,6 +313,8 @@ def main():
 
     print(f"Found {len(pairs)} URL pair(s) to process.", flush=True)
     ensure_all_headers(sheets, spreadsheet_id)
+    print("Clearing previous results from report/sections/seo tabs...", flush=True)
+    clear_data_rows(sheets, spreadsheet_id)
 
     timestamp = datetime.now(REPORT_TZ).strftime("%Y-%m-%d %H:%M:%S %Z")
     failures = 0
