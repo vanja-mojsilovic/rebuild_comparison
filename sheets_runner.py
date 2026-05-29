@@ -28,6 +28,7 @@ from comparator import (
     build_section_pairs,
     summarize_h1,
 )
+from ai_classifier import classify_sections_pair
 
 
 # All report timestamps are written in Belgrade local time (Europe/Belgrade,
@@ -75,13 +76,15 @@ SECTIONS_HEADERS = [
     "Old site section name",
     "Old HTML type",
     "Old heading text",
+    "Old AI section type",
     "New site section name",
     "New HTML type",
     "New heading text",
+    "New AI section type",
 ]
-# Sections tab spans 8 columns → A:H
-SECTIONS_RANGE = f"{SECTIONS_TAB}!A:H"
-SECTIONS_HEADER_RANGE = f"{SECTIONS_TAB}!A1:H1"
+# Sections tab spans 10 columns → A:J
+SECTIONS_RANGE = f"{SECTIONS_TAB}!A:J"
+SECTIONS_HEADER_RANGE = f"{SECTIONS_TAB}!A1:J1"
 
 
 SEO_HEADERS = [
@@ -187,19 +190,33 @@ def build_report_rows(timestamp, restaurant, old_url, new_url, comparison_rows):
     return out
 
 
-def build_sections_tab_rows(restaurant, timestamp, section_pairs):
-    """One row per paired section for the sections tab."""
+def build_sections_tab_rows(restaurant, timestamp, section_pairs, ai_labels=None):
+    """
+    One row per paired section for the sections tab.
+
+    ai_labels (optional) is a dict mapping "old_{idx}" / "new_{idx}" to the
+    AI-determined label, as returned by ai_classifier.classify_sections_pair.
+    When None or missing keys, the AI columns are left blank.
+    """
+    ai_labels = ai_labels or {}
     out = []
     for p in section_pairs:
+        old_idx = p.get("old_index")
+        new_idx = p.get("new_index")
+        old_ai = ai_labels.get(f"old_{old_idx}", "") if old_idx is not None else ""
+        new_ai = ai_labels.get(f"new_{new_idx}", "") if new_idx is not None else ""
+
         out.append([
             restaurant,
             timestamp,
             p.get("old_section_name", ""),
             p.get("old_html_type", ""),
             p.get("old_heading_text", ""),
+            old_ai,
             p.get("new_section_name", ""),
             p.get("new_html_type", ""),
             p.get("new_heading_text", ""),
+            new_ai,
         ])
     return out
 
@@ -303,8 +320,18 @@ def main():
 
             # ---- sections tab ----
             section_pairs = build_section_pairs(old_data, new_data)
+
+            # Optional AI-determined section types. Returns {} if the API
+            # key is missing or anything goes wrong — in that case the AI
+            # columns will simply stay empty.
+            ai_labels = classify_sections_pair(
+                restaurant,
+                old_data.get("sections", []),
+                new_data.get("sections", []),
+            )
+
             sections_rows = build_sections_tab_rows(
-                restaurant, timestamp, section_pairs
+                restaurant, timestamp, section_pairs, ai_labels=ai_labels
             )
             append_to_sections(sheets, spreadsheet_id, sections_rows)
 
@@ -316,8 +343,9 @@ def main():
 
             ok = sum(1 for r in comparison_rows if r.get("match") == "OK")
             issues = len(comparison_rows) - ok
+            ai_mark = "✓" if ai_labels else "✗"
             print(f"  ✓ report: {len(report_rows)} rows (OK: {ok}, issues: {issues})  "
-                  f"sections: {len(sections_rows)}  seo: {len(seo_rows)}",
+                  f"sections: {len(sections_rows)} (ai {ai_mark})  seo: {len(seo_rows)}",
                   flush=True)
         except Exception as e:
             failures += 1

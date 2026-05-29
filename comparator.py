@@ -263,6 +263,12 @@ def build_section_pairs(old_data: dict, new_data: dict) -> list:
         new_sec = new_sections[i] if i < len(new_sections) else None
 
         out.append({
+            # Original index into each side's section list when present, or
+            # None when that side has no section at this row. The runner uses
+            # these to look up AI labels (keyed by "old_{idx}" / "new_{idx}").
+            "old_index":        i if old_sec is not None else None,
+            "new_index":        i if new_sec is not None else None,
+
             "old_section_name": _label_for(old_sec) if old_sec is not None else "MISSING",
             "old_html_type":    _html_type(old_sec) if old_sec is not None else "",
             "old_heading_text": _primary_heading(old_sec) if old_sec is not None else "",
