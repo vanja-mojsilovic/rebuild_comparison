@@ -53,14 +53,23 @@ SERVICE_RULES = [
 # Element types compared, with the heading shift baked in:
 # Each tuple is (old_field, new_field, old_label, new_label).
 # old_label / new_label are written to the report's Old element / New element
-# columns respectively. The heading shift makes them differ for H1→H2 and H2→H3.
+# columns respectively.
+#
+# Headings are handled SEPARATELY (see _compare_headings) because a rebuild
+# may or may not shift heading levels (H1->H2->H3). Rather than assume a fixed
+# shift, we pool all headings on each side and match by text at ANY level —
+# so "HOMESTYLE CATERING" as an old H2 matches the same text whether it's an
+# H2 or H3 on the new side. This avoids false EXTRA/MISSING/DIFFERS rows when
+# the levels happen to line up (e.g. identical old and new URLs).
+#
+# Only the non-heading element types are driven by this table now.
 COMPARISON_FIELDS = [
-    ("h1", "h2", "H1", "H2"),                  # Old H1 should appear as New H2
-    ("h2", "h3", "H2", "H3"),                  # Old H2 should appear as New H3
-    ("h3", "h3", "H3", "H3"),                  # H3 stays at H3
     ("paragraphs", "paragraphs", "P", "P"),
     ("list_items", "list_items", "LI", "LI"),
 ]
+
+# Heading levels pooled together for the level-agnostic comparison.
+HEADING_FIELDS = ("h1", "h2", "h3")
 
 
 # Default when a section dict pre-dates the html_element_type field
@@ -476,6 +485,70 @@ def build_validated_rows(old_data: dict, new_data: dict) -> list:
     return rows
 
 
+def _headings_with_levels(section: dict) -> list:
+    """
+    Return a section's headings as (text, level_label) tuples in H1, H2, H3
+    order. level_label is "H1" / "H2" / "H3".
+    """
+    out = []
+    for field, label in (("h1", "H1"), ("h2", "H2"), ("h3", "H3")):
+        for text in section.get(field, []):
+            if text and text.strip():
+                out.append((text, label))
+    return out
+
+
+def _compare_headings(service, pair_idx, old_sec, new_sec,
+                      old_type, new_type) -> list:
+    """
+    Compare headings between two sections WITHOUT assuming a fixed level shift.
+
+    An old heading matches a new heading purely on normalized text, regardless
+    of whether it sits at H1/H2/H3 on either side. This handles both rebuild
+    styles: ones that shift levels (old H1 -> new H2) and ones that keep them
+    (old H2 -> new H2, e.g. identical pages). The element-label columns still
+    record the actual level each heading was found at, so a level change is
+    visible in the report even though it's reported as OK on text.
+
+    Match outcomes:
+      - text present on both sides  -> OK
+      - old heading text not on new -> MISSING on new
+      - new heading text not on old -> EXTRA on new
+    """
+    rows = []
+    old_headings = _headings_with_levels(old_sec)
+    new_headings = _headings_with_levels(new_sec)
+
+    new_remaining = list(new_headings)
+
+    for o_text, o_label in old_headings:
+        o_norm = _normalize(o_text)
+        matched_idx = None
+        for idx, (n_text, n_label) in enumerate(new_remaining):
+            if _normalize(n_text) == o_norm:
+                matched_idx = idx
+                break
+        if matched_idx is not None:
+            n_text, n_label = new_remaining.pop(matched_idx)
+            rows.append(_row(service, pair_idx, o_label, n_label,
+                             o_text, "", "", old_type,
+                             n_text, "", "", new_type,
+                             "OK"))
+        else:
+            rows.append(_row(service, pair_idx, o_label, "",
+                             o_text, "", "", old_type,
+                             "", "", "", new_type,
+                             "MISSING on new"))
+
+    for n_text, n_label in new_remaining:
+        rows.append(_row(service, pair_idx, "", n_label,
+                         "", "", "", old_type,
+                         n_text, "", "", new_type,
+                         "EXTRA on new"))
+
+    return rows
+
+
 def _compare_section_pair(service, pair_idx, old_sec, new_sec) -> list:
     """Walk a paired (Old, New) section pair and emit comparison rows."""
     out = []
@@ -488,6 +561,21 @@ def _compare_section_pair(service, pair_idx, old_sec, new_sec) -> list:
     if old_sec is None or new_sec is None:
         present = old_sec or new_sec
         side_missing = "old" if old_sec is None else "new"
+
+        # Headings on the present side (each at its real level)
+        for text, label in _headings_with_levels(present):
+            if side_missing == "old":
+                out.append(_row(service, pair_idx, "", label,
+                                "", "", "", old_type,
+                                text, "", "", new_type,
+                                "EXTRA on new"))
+            else:
+                out.append(_row(service, pair_idx, label, "",
+                                text, "", "", old_type,
+                                "", "", "", new_type,
+                                "MISSING on new"))
+
+        # Paragraphs / list items on the present side
         for (o_field, n_field, o_label, n_label) in COMPARISON_FIELDS:
             field = o_field if old_sec is None else n_field  # use whichever side exists
             for text in present.get(field, []):
@@ -517,7 +605,11 @@ def _compare_section_pair(service, pair_idx, old_sec, new_sec) -> list:
                                 "MISSING on new"))
         return out
 
-    # Both sections exist — compare per element type with heading shift
+    # Both sections exist.
+    # Headings: level-agnostic text match (handles shifted and unshifted rebuilds)
+    out.extend(_compare_headings(service, pair_idx, old_sec, new_sec, old_type, new_type))
+
+    # Paragraphs and list items: straight level-to-level comparison
     for (o_field, n_field, o_label, n_label) in COMPARISON_FIELDS:
         old_texts = old_sec.get(o_field, [])
         new_texts = new_sec.get(n_field, [])
