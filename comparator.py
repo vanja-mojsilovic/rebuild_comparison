@@ -700,10 +700,11 @@ def _compare_section_pair(service, pair_idx, old_sec, new_sec) -> list:
             h = btn.get("hidden_text", "")
             href = btn.get("href", "")
             if side_missing == "old":
+                status = "EXPECTED" if _is_expected_affordance(btn) else "EXTRA on new"
                 out.append(_row(service, pair_idx, "", "BUTTON",
                                 "", "", "", old_type,
                                 v, href, h, new_type,
-                                "EXTRA on new"))
+                                status))
             else:
                 out.append(_row(service, pair_idx, "BUTTON", "",
                                 v, href, h, old_type,
@@ -869,6 +870,36 @@ def _compare_social_buttons(service, pair_idx, old_socials, new_socials,
                              n.get("href", ""), n.get("hidden_text", ""), new_type,
                              "EXTRA on new"))
     return rows
+
+
+def _is_expected_affordance(btn: dict) -> bool:
+    """
+    True if a button is a template-added accessibility / widget affordance that
+    the new SpotHopper template introduces and the old site lacked — e.g. a
+    "Skip Photo Gallery" skip-link or a "Reset zoom" map control. When such a
+    button appears only on the new side it's an EXPECTED template addition, not
+    a real content difference, so it should be marked EXPECTED rather than
+    EXTRA on new.
+
+    Matched on combined visible + hidden text, lowercased.
+    """
+    text = _normalize(
+        " ".join(x for x in [
+            btn.get("visible_text") or btn.get("text") or "",
+            btn.get("hidden_text") or "",
+        ] if x)
+    )
+    if not text:
+        return False
+    patterns = (
+        r"\bskip\b.*\b(photo\s*gallery|gallery|slideshow|carousel|content|to main)\b",
+        r"\breset\s*zoom\b",
+        r"\bzoom\s*(in|out)\b",
+        r"\bskip to\b",
+        r"\bback to top\b",
+        r"\benable\s*(accessibility|high contrast)\b",
+    )
+    return any(re.search(p, text) for p in patterns)
 
 
 def _carousel_control_kind(btn: dict) -> Optional[str]:
@@ -1045,13 +1076,19 @@ def _compare_buttons(service, pair_idx, old_btns, new_btns,
 
         if matched is not None:
             new_remaining.remove(matched)
+            n_href_matched = matched.get("href", "")
+            # Identical raw href -> OK. Matched only after normalization
+            # (e.g. the new link added a trailing "#", dropped www., or a
+            # trailing slash) -> EXPECTED: a cosmetic rebuild change, not a
+            # real difference.
+            btn_status = "OK" if (o_href or "").strip() == (n_href_matched or "").strip() else "EXPECTED"
             rows.append(_row(service, pair_idx, "BUTTON", "BUTTON",
                              o_visible, o_href, o_hidden, old_type,
                              matched.get("visible_text", "") or matched.get("text", ""),
-                             matched.get("href", ""),
+                             n_href_matched,
                              matched.get("hidden_text", ""),
                              new_type,
-                             "OK"))
+                             btn_status))
         else:
             # Look for visible-text match with different href → still differs but pair them
             partial: Optional[dict] = None
@@ -1085,13 +1122,17 @@ def _compare_buttons(service, pair_idx, old_btns, new_btns,
                                  "MISSING on new"))
 
     for n in new_remaining:
+        # A template-added affordance (Skip Photo Gallery, Reset zoom, etc.)
+        # that exists only on the new side is an EXPECTED template addition,
+        # not a real extra button.
+        status = "EXPECTED" if _is_expected_affordance(n) else "EXTRA on new"
         rows.append(_row(service, pair_idx, "", "BUTTON",
                          "", "", "", old_type,
                          n.get("visible_text", "") or n.get("text", ""),
                          n.get("href", ""),
                          n.get("hidden_text", ""),
                          new_type,
-                         "EXTRA on new"))
+                         status))
 
     return rows
 
@@ -1226,8 +1267,10 @@ def _normalize_href(href: str) -> str:
       - drop the scheme (http:// or https://)
       - drop a leading www.
       - drop a trailing slash
+      - drop a trailing empty fragment ("#" with nothing after it)
     So "https://www.facebook.com/cafeluna" and "https://facebook.com/cafeluna/"
-    both normalize to "facebook.com/cafeluna" and compare equal.
+    both normalize to "facebook.com/cafeluna" and compare equal; and
+    ".../saveurs-du-monde-cafe" vs ".../saveurs-du-monde-cafe#" compare equal.
 
     tel: and mailto: links are left essentially as-is (just lowercased and
     stripped) since they have no scheme/host to normalize.
@@ -1240,5 +1283,6 @@ def _normalize_href(href: str) -> str:
         return h.rstrip("/")
     h = re.sub(r"^https?://", "", h)   # drop scheme
     h = re.sub(r"^www\.", "", h)        # drop leading www.
+    h = re.sub(r"#$", "", h)            # drop a trailing empty fragment
     h = h.rstrip("/")                   # drop trailing slash
     return h
