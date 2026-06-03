@@ -590,10 +590,29 @@ def _section_data(el: Tag) -> dict:
                 out.append(text_value)
         return out
 
+    # Hidden (screen-reader-only) text per heading, keyed by the heading's
+    # VISIBLE text. The comparison strips this from the matched text (so the
+    # address still pairs) but reports it in the Old/New hidden columns, and
+    # uses it to mark a visible-match-but-hidden-differs pair as EXPECTED.
+    heading_hidden = {}
+    def collect_hidden(tag_name: str):
+        for t in el.find_all(tag_name):
+            if id(t) in off_limits:
+                continue
+            visible = _text_excluding_clickables(t)
+            if not visible:
+                continue
+            hidden = _hidden_text_excluding_clickables(t)
+            if hidden:
+                # Keyed by normalized-ish visible text; last write wins (rare dup)
+                heading_hidden[visible] = hidden
+
     h1 = texts("h1")
     h2 = texts("h2")
     h3 = texts("h3")
     h4 = texts("h4")
+    for lvl in ("h1", "h2", "h3", "h4"):
+        collect_hidden(lvl)
     paragraphs = texts("p")
     list_items = texts("li")
 
@@ -606,6 +625,7 @@ def _section_data(el: Tag) -> dict:
         "h2": h2,
         "h3": h3,
         "h4": h4,
+        "heading_hidden": heading_hidden,
         "paragraphs": paragraphs,
         "list_items": list_items,
         "buttons": buttons,
@@ -793,6 +813,30 @@ def _is_visually_hidden(node) -> bool:
         return False
     cls = node.get("class") or []
     return any(c in HIDDEN_CLASSES for c in cls)
+
+
+def _hidden_text_excluding_clickables(node: Tag) -> str:
+    """
+    Return the visually-hidden (screen-reader-only) text directly within
+    `node`, EXCLUDING any text inside clickables (whose hidden text belongs to
+    the button bucket). Used to surface a heading's sr-only prefix/suffix
+    (e.g. "Visit us at") in the report's hidden column without letting it
+    affect the visible-text match.
+    """
+    skip_ids = set()
+    for clickable in node.select('a, button, [role="button"], [role="link"]'):
+        for s in clickable.find_all(string=True):
+            skip_ids.add(id(s))
+
+    parts = []
+    for hidden_el in node.find_all(True):
+        if not _is_visually_hidden(hidden_el):
+            continue
+        for s in hidden_el.find_all(string=True):
+            if id(s) in skip_ids:
+                continue
+            parts.append(str(s))
+    return _clean_text(" ".join(parts))
 
 
 def _text_excluding_clickables(node: Tag) -> str:

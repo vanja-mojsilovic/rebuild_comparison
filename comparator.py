@@ -627,7 +627,11 @@ def _compare_text_elements(service, pair_idx, old_sec, new_sec,
     new_items = _text_elements_with_rank(new_sec)
     new_remaining = list(new_items)
 
+    old_hidden_map = old_sec.get("heading_hidden", {}) or {}
+    new_hidden_map = new_sec.get("heading_hidden", {}) or {}
+
     for o_text, o_label, o_rank in old_items:
+        o_hidden = old_hidden_map.get(o_text, "")
         matched_idx = None
         for idx, (n_text, n_label, n_rank) in enumerate(new_remaining):
             if _text_equiv(n_text, o_text):
@@ -635,21 +639,28 @@ def _compare_text_elements(service, pair_idx, old_sec, new_sec,
                 break
         if matched_idx is not None:
             n_text, n_label, n_rank = new_remaining.pop(matched_idx)
+            n_hidden = new_hidden_map.get(n_text, "")
             status = _move_match_status(o_rank, n_rank)
+            # Visible text matches but the visually-hidden text differs (e.g.
+            # the new side added a "Visit us at" sr-only prefix) -> EXPECTED
+            # accessibility change rather than a plain OK.
+            if status == "OK" and _normalize(o_hidden) != _normalize(n_hidden):
+                status = "EXPECTED"
             rows.append(_row(service, pair_idx, o_label, n_label,
-                             o_text, "", "", old_type,
-                             n_text, "", "", new_type,
+                             o_text, "", o_hidden, old_type,
+                             n_text, "", n_hidden, new_type,
                              status))
         else:
             rows.append(_row(service, pair_idx, o_label, "",
-                             o_text, "", "", old_type,
+                             o_text, "", o_hidden, old_type,
                              "", "", "", new_type,
                              "MISSING on new"))
 
     for n_text, n_label, n_rank in new_remaining:
+        n_hidden = new_hidden_map.get(n_text, "")
         rows.append(_row(service, pair_idx, "", n_label,
                          "", "", "", old_type,
-                         n_text, "", "", new_type,
+                         n_text, "", n_hidden, new_type,
                          "EXTRA on new"))
 
     return rows
