@@ -539,7 +539,12 @@ def _section_data(el: Tag) -> dict:
 
     # --- 1. Find all clickables and mark their text as off-limits ---
     clickable_selector = 'a, button, [role="button"], [role="link"]'
-    clickable_els = el.select(clickable_selector)
+    # Skip clickables that sit inside a hidden wrapper (aria-hidden="true",
+    # display:none, .d-none, data-hidden="yes", etc.). Carousel libraries like
+    # Owl clone slides and mark both the clones and the non-active slides
+    # aria-hidden="true"; those duplicates must not be scraped.
+    clickable_els = [c for c in el.select(clickable_selector)
+                     if not _is_hidden_anywhere(c)]
 
     off_limits = set()
     for c in clickable_els:
@@ -579,11 +584,15 @@ def _section_data(el: Tag) -> dict:
             "href": href,
         })
 
-    # --- 3. Collect headings/paragraphs/list-items, excluding clickable text ---
+    # --- 3. Collect headings/paragraphs/list-items, excluding clickable text
+    #         and excluding anything inside a hidden wrapper (carousel clones,
+    #         inactive slides, display:none blocks, etc.). ---
     def texts(tag_name: str) -> list:
         out = []
         for t in el.find_all(tag_name):
             if id(t) in off_limits:
+                continue
+            if _is_hidden_anywhere(t):
                 continue
             text_value = _text_excluding_clickables(t)
             if text_value:
@@ -598,6 +607,8 @@ def _section_data(el: Tag) -> dict:
     def collect_hidden(tag_name: str):
         for t in el.find_all(tag_name):
             if id(t) in off_limits:
+                continue
+            if _is_hidden_anywhere(t):
                 continue
             visible = _text_excluding_clickables(t)
             if not visible:
