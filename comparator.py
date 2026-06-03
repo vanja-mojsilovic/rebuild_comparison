@@ -787,10 +787,151 @@ def _compare_text_lists(service, pair_idx, old_label, new_label,
     return rows
 
 
+def _carousel_control_kind(btn: dict) -> Optional[str]:
+    """
+    Identify carousel widget chrome (not content) by its button text.
+    Returns a sub-kind so we only pair like with like:
+      - "play_pause"  the autoplay toggle: "Play reviews carousel",
+                      "Stop reviews carousel", "Start stop reviews carousel",
+                      "pause", "play slideshow", etc.
+      - "dot_nav"     the slide dots: "dot navigation slide 3", "Review 2",
+                      "slide 4", "go to slide 1", etc.
+      - "arrow_nav"   prev/next arrows: the bare glyphs/words used for
+                      stepping the carousel ("previous", "next", "‹", "›")
+      - None          not a carousel control
+
+    Each candidate string (the visible text, the hidden text, and the two
+    combined) is tested, because the meaningful label sometimes lives only in
+    the screen-reader (hidden) span and the visible+hidden combo can duplicate
+    words (e.g. "Review 1 Review 1") which would break a fullmatch.
+    """
+    candidates = []
+    vis = _normalize(btn.get("visible_text") or btn.get("text") or "")
+    hid = _normalize(btn.get("hidden_text") or "")
+    if vis:
+        candidates.append(vis)
+    if hid:
+        candidates.append(hid)
+    if vis and hid and vis != hid:
+        candidates.append(_normalize(f"{vis} {hid}"))
+    if not candidates:
+        return None
+
+    def any_match(pred) -> bool:
+        return any(pred(c) for c in candidates)
+
+    # play / pause / stop / start-stop toggle for a carousel or slideshow
+    if any_match(lambda t: bool(
+        re.search(r"\b(play|pause|stop|start stop|autoplay)\b.*\b(carousel|slideshow|slider|reviews?)\b", t) or
+        re.search(r"\b(carousel|slideshow|slider|reviews?)\b.*\b(play|pause|stop|start stop|autoplay)\b", t)
+    )):
+        return "play_pause"
+
+    # dot navigation: "dot navigation slide N", "go to slide N", "slide N",
+    # or the SpotHopper review-dot label "Review N"
+    if any_match(lambda t: bool(
+        re.search(r"\bdot navigation\b", t) or
+        re.search(r"\bslide\s+\d+\b", t) or
+        re.search(r"\bgo to slide\b", t) or
+        re.fullmatch(r"review\s+\d+", t)
+    )):
+        return "dot_nav"
+
+    # prev / next arrows (bare glyphs or words)
+    if any_match(lambda t: (
+        t in {"‹", "›", "<", ">", "«", "»", "previous", "next", "prev"} or
+        bool(re.search(r"\b(previous|next)\s+(slide|review|item)\b", t))
+    )):
+        return "arrow_nav"
+
+    return None
+
+
+def _compare_carousel_controls(service, pair_idx, old_ctrls, new_ctrls,
+                               old_type, new_type) -> list:
+    """
+    Pair carousel widget chrome (play/pause, dot-nav, arrows) by sub-kind and
+    mark every pairing OK regardless of the exact label wording — the controls
+    are functionally equivalent even when the rebuild renames them (e.g. old
+    "Play reviews carousel" + "Stop reviews carousel" vs new "Start stop
+    reviews carousel"; old "dot navigation slide N" vs new "Review N").
+
+    Within each sub-kind we pair positionally up to the shorter list, marking
+    those OK. Any surplus on one side is reported (MISSING/EXTRA) so a genuine
+    change in control count is still visible.
+    """
+    rows = []
+
+    def bucketize(ctrls):
+        buckets = {"play_pause": [], "dot_nav": [], "arrow_nav": []}
+        for b in ctrls:
+            kind = _carousel_control_kind(b)
+            if kind:
+                buckets[kind].append(b)
+        return buckets
+
+    old_b = bucketize(old_ctrls)
+    new_b = bucketize(new_ctrls)
+
+    for kind in ("play_pause", "dot_nav", "arrow_nav"):
+        o_list = old_b[kind]
+        n_list = new_b[kind]
+        paired = min(len(o_list), len(n_list))
+        for i in range(paired):
+            o = o_list[i]
+            n = n_list[i]
+            rows.append(_row(service, pair_idx, "BUTTON", "BUTTON",
+                             o.get("visible_text", "") or o.get("text", ""),
+                             o.get("href", ""), o.get("hidden_text", ""), old_type,
+                             n.get("visible_text", "") or n.get("text", ""),
+                             n.get("href", ""), n.get("hidden_text", ""), new_type,
+                             "OK"))
+        # Surplus controls of the SAME kind are still functionally part of the
+        # same widget chrome (e.g. the old site splits the autoplay toggle into
+        # two buttons "Play" + "Stop" while the new site uses one combined
+        # "Start stop"; or the dot counts differ by one). The user asked for
+        # these to read OK regardless of wording or count, so we pair each
+        # surplus against an empty counterpart and still mark OK rather than
+        # MISSING/EXTRA.
+        for o in o_list[paired:]:
+            rows.append(_row(service, pair_idx, "BUTTON", "",
+                             o.get("visible_text", "") or o.get("text", ""),
+                             o.get("href", ""), o.get("hidden_text", ""), old_type,
+                             "", "", "", new_type,
+                             "OK"))
+        for n in n_list[paired:]:
+            rows.append(_row(service, pair_idx, "", "BUTTON",
+                             "", "", "", old_type,
+                             n.get("visible_text", "") or n.get("text", ""),
+                             n.get("href", ""), n.get("hidden_text", ""), new_type,
+                             "OK"))
+
+    return rows
+
+
 def _compare_buttons(service, pair_idx, old_btns, new_btns,
                      old_type, new_type) -> list:
-    """Compare button lists by (visible_text, href) — both must match for OK."""
+    """Compare button lists by (visible_text, href) — both must match for OK.
+
+    Carousel widget chrome (play/pause, dot-nav, arrows) is split out first
+    and paired by sub-kind via _compare_carousel_controls, so renamed-but-
+    equivalent controls ("Play reviews carousel" vs "Review 1") don't produce
+    DIFFERS/EXTRA noise. The remaining real buttons go through normal
+    content-based matching.
+    """
     rows = []
+
+    # --- Pre-pass: carousel controls, paired by kind and marked OK ---
+    old_controls = [b for b in old_btns if _carousel_control_kind(b)]
+    new_controls = [b for b in new_btns if _carousel_control_kind(b)]
+    if old_controls or new_controls:
+        rows.extend(_compare_carousel_controls(
+            service, pair_idx, old_controls, new_controls, old_type, new_type))
+
+    # Real (non-chrome) buttons go through the normal comparison
+    old_btns = [b for b in old_btns if not _carousel_control_kind(b)]
+    new_btns = [b for b in new_btns if not _carousel_control_kind(b)]
+
     new_remaining = list(new_btns)
 
     for o in old_btns:
@@ -929,10 +1070,22 @@ def _row(service, pair_idx, old_element, new_element,
 
 
 def _normalize(s: str) -> str:
-    """Normalize text for comparison: lowercase, collapse whitespace, strip."""
+    """
+    Normalize text for comparison: lowercase, collapse whitespace, strip,
+    and remove spaces sitting directly before punctuation.
+
+    The punctuation-spacing step makes cosmetic typographic differences
+    compare equal, e.g. "Mt. Pleasant , SC" (space before the comma) vs
+    "Mt. Pleasant, SC" — common when an address is re-typed during a
+    rebuild. Without this, such a pair would fail to match and show up as a
+    spurious MISSING + EXTRA instead of a clean pairing.
+    """
     if not s:
         return ""
-    return re.sub(r"\s+", " ", str(s).strip().lower())
+    out = re.sub(r"\s+", " ", str(s).strip().lower())
+    # Drop a space that sits immediately before , . ; : ! ?
+    out = re.sub(r"\s+([,.;:!?])", r"\1", out)
+    return out
 
 
 def _normalize_href(href: str) -> str:
