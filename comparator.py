@@ -797,13 +797,13 @@ def _compare_buttons(service, pair_idx, old_btns, new_btns,
         o_visible = (o.get("visible_text") or o.get("text") or "")
         o_hidden = o.get("hidden_text", "")
         o_href = o.get("href", "")
-        o_norm = (_normalize(o_visible), _normalize(o_href))
+        o_norm = (_normalize(o_visible), _normalize_href(o_href))
 
         matched: Optional[dict] = None
         for n in new_remaining:
             n_visible = (n.get("visible_text") or n.get("text") or "")
             n_href = n.get("href", "")
-            if (_normalize(n_visible), _normalize(n_href)) == o_norm:
+            if (_normalize(n_visible), _normalize_href(n_href)) == o_norm:
                 matched = n
                 break
 
@@ -933,3 +933,28 @@ def _normalize(s: str) -> str:
     if not s:
         return ""
     return re.sub(r"\s+", " ", str(s).strip().lower())
+
+
+def _normalize_href(href: str) -> str:
+    """
+    Normalize a URL so cosmetic differences don't trigger false DIFFERS:
+      - lowercase
+      - drop the scheme (http:// or https://)
+      - drop a leading www.
+      - drop a trailing slash
+    So "https://www.facebook.com/cafeluna" and "https://facebook.com/cafeluna/"
+    both normalize to "facebook.com/cafeluna" and compare equal.
+
+    tel: and mailto: links are left essentially as-is (just lowercased and
+    stripped) since they have no scheme/host to normalize.
+    """
+    if not href:
+        return ""
+    h = href.strip().lower()
+    # Leave tel:/mailto: (and other non-http schemes) mostly alone
+    if h.startswith(("tel:", "mailto:")):
+        return h.rstrip("/")
+    h = re.sub(r"^https?://", "", h)   # drop scheme
+    h = re.sub(r"^www\.", "", h)        # drop leading www.
+    h = h.rstrip("/")                   # drop trailing slash
+    return h

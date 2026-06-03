@@ -793,14 +793,27 @@ def _is_visually_hidden(node) -> bool:
 
 def _text_excluding_clickables(node: Tag) -> str:
     """
-    Return the text content of `node` with all <a>, <button>,
-    [role=button], and [role=link] descendant text removed. Prevents
-    link text from appearing twice (once in buttons, once in p/h*).
+    Return the VISIBLE text content of `node` with two kinds of text removed:
+
+      1. Text inside clickables (<a>, <button>, [role=button], [role=link]) —
+         that text belongs to the buttons bucket, not headings/paragraphs,
+         so excluding it here prevents double-counting.
+      2. Visually-hidden text (sr-only / visuallyhidden / etc.) — this is
+         screen-reader-only chrome like "five star review by" prepended to a
+         reviewer name. It isn't visible content and would otherwise make an
+         old reviewer-name heading ("Milka K:") fail to match the new site's
+         "five star review by Milka K:". Stripping it leaves just the visible
+         name on both sides so they pair correctly.
     """
     skip_ids = set()
     for clickable in node.select('a, button, [role="button"], [role="link"]'):
         for s in clickable.find_all(string=True):
             skip_ids.add(id(s))
+    # Also skip text inside any visually-hidden descendant
+    for hidden_el in node.find_all(True):
+        if _is_visually_hidden(hidden_el):
+            for s in hidden_el.find_all(string=True):
+                skip_ids.add(id(s))
 
     parts = []
     for s in node.find_all(string=True):
