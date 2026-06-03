@@ -83,6 +83,10 @@ HIDDEN_CLASSES = {
     "sr-only",
     "screen-reader-text",
     "screen-reader-only",
+    "off-screen",
+    "offscreen",
+    "show-for-sr",
+    "sr-only-focusable",
 }
 
 # ---------------------------------------------------------------------------
