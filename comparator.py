@@ -628,10 +628,9 @@ def _compare_text_elements(service, pair_idx, old_sec, new_sec,
     new_remaining = list(new_items)
 
     for o_text, o_label, o_rank in old_items:
-        o_norm = _normalize(o_text)
         matched_idx = None
         for idx, (n_text, n_label, n_rank) in enumerate(new_remaining):
-            if _normalize(n_text) == o_norm:
+            if _text_equiv(n_text, o_text):
                 matched_idx = idx
                 break
         if matched_idx is not None:
@@ -787,6 +786,91 @@ def _compare_text_lists(service, pair_idx, old_label, new_label,
     return rows
 
 
+_SOCIAL_HOSTS = [
+    ("twitter",   ("twitter.com", "x.com")),
+    ("facebook",  ("facebook.com", "fb.com", "fb.me")),
+    ("instagram", ("instagram.com",)),
+    ("yelp",      ("yelp.com",)),
+    ("google",    ("google.com/maps", "maps.google.com", "g.page",
+                   "google.com/search", "business.google.com")),
+    ("apple",     ("apps.apple.com", "maps.apple.com")),
+    ("tiktok",    ("tiktok.com",)),
+    ("youtube",   ("youtube.com", "youtu.be")),
+    ("linkedin",  ("linkedin.com",)),
+    ("pinterest", ("pinterest.com",)),
+]
+
+
+def _social_network(btn: dict) -> Optional[str]:
+    """
+    Identify which social network a button points at, based on its href host.
+    Returns a network key ("twitter", "facebook", ...) or None.
+
+    Matching on the host (not the visible text) lets us pair the same network
+    across a rebrand even when the label changed ("Twitter page" vs
+    "Twitter/ X page") or the buttons were reordered. The Google entry is
+    host+path aware because google.com is also used for plain search links.
+    """
+    href = (btn.get("href") or "").lower()
+    if not href:
+        return None
+    h = re.sub(r"^https?://", "", href)
+    h = re.sub(r"^www\.", "", h)
+    for network, needles in _SOCIAL_HOSTS:
+        if any(needle in h for needle in needles):
+            return network
+    return None
+
+
+def _compare_social_buttons(service, pair_idx, old_socials, new_socials,
+                            old_type, new_type) -> list:
+    """
+    Pair social-media buttons by network (twitter<->twitter, etc.) regardless
+    of label wording, link order, or cosmetic href differences. Same network
+    on both sides -> OK. A network present on only one side is reported
+    (MISSING/EXTRA) so a genuinely added/removed social link still surfaces.
+    """
+    rows = []
+    old_by_net = {}
+    new_by_net = {}
+    for b in old_socials:
+        old_by_net.setdefault(_social_network(b), []).append(b)
+    for b in new_socials:
+        new_by_net.setdefault(_social_network(b), []).append(b)
+
+    networks = list(old_by_net.keys())
+    for net in new_by_net:
+        if net not in networks:
+            networks.append(net)
+
+    for net in networks:
+        o_list = old_by_net.get(net, [])
+        n_list = new_by_net.get(net, [])
+        paired = min(len(o_list), len(n_list))
+        for i in range(paired):
+            o, n = o_list[i], n_list[i]
+            # Same network → OK, regardless of label wording or href format
+            rows.append(_row(service, pair_idx, "BUTTON", "BUTTON",
+                             o.get("visible_text", "") or o.get("text", ""),
+                             o.get("href", ""), o.get("hidden_text", ""), old_type,
+                             n.get("visible_text", "") or n.get("text", ""),
+                             n.get("href", ""), n.get("hidden_text", ""), new_type,
+                             "OK"))
+        for o in o_list[paired:]:
+            rows.append(_row(service, pair_idx, "BUTTON", "",
+                             o.get("visible_text", "") or o.get("text", ""),
+                             o.get("href", ""), o.get("hidden_text", ""), old_type,
+                             "", "", "", new_type,
+                             "MISSING on new"))
+        for n in n_list[paired:]:
+            rows.append(_row(service, pair_idx, "", "BUTTON",
+                             "", "", "", old_type,
+                             n.get("visible_text", "") or n.get("text", ""),
+                             n.get("href", ""), n.get("hidden_text", ""), new_type,
+                             "EXTRA on new"))
+    return rows
+
+
 def _carousel_control_kind(btn: dict) -> Optional[str]:
     """
     Identify carousel widget chrome (not content) by its button text.
@@ -928,9 +1012,20 @@ def _compare_buttons(service, pair_idx, old_btns, new_btns,
         rows.extend(_compare_carousel_controls(
             service, pair_idx, old_controls, new_controls, old_type, new_type))
 
-    # Real (non-chrome) buttons go through the normal comparison
+    # Remove carousel chrome from further consideration
     old_btns = [b for b in old_btns if not _carousel_control_kind(b)]
     new_btns = [b for b in new_btns if not _carousel_control_kind(b)]
+
+    # --- Pre-pass: social-media buttons, paired by network ---
+    old_socials = [b for b in old_btns if _social_network(b)]
+    new_socials = [b for b in new_btns if _social_network(b)]
+    if old_socials or new_socials:
+        rows.extend(_compare_social_buttons(
+            service, pair_idx, old_socials, new_socials, old_type, new_type))
+
+    # Real (non-chrome, non-social) buttons go through normal comparison
+    old_btns = [b for b in old_btns if not _social_network(b)]
+    new_btns = [b for b in new_btns if not _social_network(b)]
 
     new_remaining = list(new_btns)
 
@@ -1067,6 +1162,42 @@ def _row(service, pair_idx, old_element, new_element,
         "new_html_type": new_html_type,
         "match": match,
     }
+
+
+def _normalize_loose(s: str) -> str:
+    """
+    A looser normalization for fuzzy text equivalence. On top of _normalize
+    (lowercase, collapse whitespace, strip space-before-punctuation), this:
+      - drops trailing punctuation
+      - collapses a trailing plural 's' on each word
+
+    Used only as a FALLBACK after exact normalized matching fails, so that
+    near-identical headings differing only by singular/plural or a trailing
+    colon — e.g. "Location" vs "Locations", "Review" vs "Reviews:" — still
+    pair instead of showing up as MISSING + EXTRA. Kept conservative (only
+    a trailing 's') to avoid over-matching unrelated words.
+    """
+    base = _normalize(s)
+    if not base:
+        return ""
+    base = base.rstrip(".,;:!?")
+    words = []
+    for w in base.split():
+        if len(w) > 3 and w.endswith("s") and not w.endswith("ss"):
+            w = w[:-1]
+        words.append(w)
+    return " ".join(words)
+
+
+def _text_equiv(a: str, b: str) -> bool:
+    """
+    True if two text strings are equivalent for comparison purposes.
+    Tries exact normalized equality first, then a singular/plural- and
+    trailing-punctuation-tolerant comparison.
+    """
+    if _normalize(a) == _normalize(b):
+        return True
+    return _normalize_loose(a) == _normalize_loose(b)
 
 
 def _normalize(s: str) -> str:
