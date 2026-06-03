@@ -85,3 +85,5 @@ clone-comparison-py/
 - The 30-second Playwright timeout may not be enough for very slow sites — increase it in `scraper.py` if needed.
 - Section classification uses the same keyword rules as the Apps Script tool (catering, parties, reservations, etc.). Sections that don't match any keyword fall into "other".
 - The heading-shift rule currently checks Old H1 → New H2 and Old H2 → New H3. If your rebuild template moves H3s to H4 too, extend `compare_container` in `comparator.py`.
+
+
