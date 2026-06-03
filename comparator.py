@@ -695,7 +695,23 @@ def _compare_section_pair(service, pair_idx, old_sec, new_sec) -> list:
                                     text, "", "", old_type,
                                     "", "", "", new_type,
                                     "MISSING on new"))
+        # Phone numbers present on the existing side (clickable or plain text)
+        for ph in _extract_phones(present):
+            if side_missing == "old":
+                out.append(_row(service, pair_idx, "", "PHONE",
+                                "", "", "", old_type,
+                                ph["display"], "", "", new_type,
+                                "EXTRA on new"))
+            else:
+                out.append(_row(service, pair_idx, "PHONE", "",
+                                ph["display"], "", "", old_type,
+                                "", "", "", new_type,
+                                "MISSING on new"))
+
         for btn in present.get("buttons", []):
+            # tel: links are reported as PHONE rows above, not as buttons
+            if (btn.get("href", "") or "").lower().startswith("tel:"):
+                continue
             v = btn.get("visible_text", "") or btn.get("text", "")
             h = btn.get("hidden_text", "")
             href = btn.get("href", "")
@@ -727,15 +743,124 @@ def _compare_section_pair(service, pair_idx, old_sec, new_sec) -> list:
             old_type, new_type,
         ))
 
-    # Buttons compared with text AND href
+    # Phone numbers: compared by digits across BOTH clickable tel: links and
+    # plain text, so a number that became plain text (or vice versa) still
+    # pairs as OK. Handled before buttons so tel: links aren't double-counted.
+    out.extend(_compare_phones(service, pair_idx, old_sec, new_sec, old_type, new_type))
+
+    # Buttons compared with text AND href. tel: links are excluded here because
+    # phone numbers are handled by _compare_phones above (otherwise an old tel:
+    # link with no clickable counterpart on the new side would also show up as
+    # a spurious MISSING button).
     out.extend(_compare_buttons(
         service, pair_idx,
-        old_sec.get("buttons", []),
-        new_sec.get("buttons", []),
+        [b for b in old_sec.get("buttons", []) if not (b.get("href", "") or "").lower().startswith("tel:")],
+        [b for b in new_sec.get("buttons", []) if not (b.get("href", "") or "").lower().startswith("tel:")],
         old_type, new_type,
     ))
 
     return out
+
+
+def _phone_digits(s: str) -> str:
+    """
+    Extract a normalized phone-number key from a string: the trailing 10 digits
+    (US numbers), or all digits if fewer than 10. Returns "" if there aren't
+    enough digits to look like a phone number. Using the last 10 digits makes
+    "+1 (843) 640-3986", "843-640-3986", and "tel:+18436403986" all collapse to
+    "8436403986".
+    """
+    digits = re.sub(r"\D", "", s or "")
+    if len(digits) < 10:
+        return ""
+    return digits[-10:]
+
+
+# A phone number appearing in free text: matches (843)-640-3986,
+# 843-640-3986, 843.640.3986, +1 843 640 3986, etc.
+_PHONE_TEXT_RE = re.compile(
+    r"(?:\+?\d[\s.\-]?)?(?:\(?\d{3}\)?[\s.\-]?)\d{3}[\s.\-]?\d{4}"
+)
+
+
+def _extract_phones(section: dict) -> list:
+    """
+    Find every phone number in a section, whether it's a clickable tel: link
+    (a button) or plain text (in a heading/paragraph/list item). Returns a list
+    of dicts: {"key": <last-10-digits>, "display": <as shown>, "clickable": bool}.
+
+    De-duplicated by key so the same number listed twice in one section counts
+    once per side.
+    """
+    found = {}
+
+    def add(display, key, clickable):
+        if not key:
+            return
+        # Prefer a clickable record over a non-clickable one for the same number
+        if key not in found or (clickable and not found[key]["clickable"]):
+            found[key] = {"key": key, "display": display.strip(), "clickable": clickable}
+
+    # 1. tel: link buttons
+    for b in section.get("buttons", []):
+        href = b.get("href", "") or ""
+        if href.lower().startswith("tel:"):
+            key = _phone_digits(href)
+            disp = (b.get("visible_text") or b.get("text") or href[4:]).strip()
+            add(disp, key, clickable=True)
+
+    # 2. plain-text phone numbers in headings / paragraphs / list items
+    for field in ("h1", "h2", "h3", "h4", "paragraphs", "list_items"):
+        for text in section.get(field, []):
+            for m in _PHONE_TEXT_RE.finditer(text or ""):
+                snippet = m.group(0)
+                add(snippet, _phone_digits(snippet), clickable=False)
+
+    # 3. plain-text phone numbers anywhere else in the section's text content.
+    #    SpotHopper hours blocks often put the number in a bare <div> (e.g.
+    #    "Phone: 843-640-3986"), which isn't captured as a paragraph/heading,
+    #    so we also scan the section's full raw_text. Numbers already found
+    #    above are de-duplicated by key.
+    for m in _PHONE_TEXT_RE.finditer(section.get("raw_text", "") or ""):
+        snippet = m.group(0)
+        add(snippet, _phone_digits(snippet), clickable=False)
+
+    return list(found.values())
+
+
+def _compare_phones(service, pair_idx, old_sec, new_sec, old_type, new_type) -> list:
+    """
+    Compare phone numbers between two sections by their digits, regardless of
+    whether each side renders the number as a clickable tel: link or as plain
+    text. Same digits on both sides -> OK (the display columns show each
+    side's form, so a link-became-text change is still visible). A number on
+    only one side -> MISSING on new / EXTRA on new.
+    """
+    rows = []
+    old_phones = {p["key"]: p for p in _extract_phones(old_sec)}
+    new_phones = {p["key"]: p for p in _extract_phones(new_sec)}
+
+    for key, o in old_phones.items():
+        n = new_phones.get(key)
+        if n is not None:
+            rows.append(_row(service, pair_idx, "PHONE", "PHONE",
+                             o["display"], "", "", old_type,
+                             n["display"], "", "", new_type,
+                             "OK"))
+        else:
+            rows.append(_row(service, pair_idx, "PHONE", "",
+                             o["display"], "", "", old_type,
+                             "", "", "", new_type,
+                             "MISSING on new"))
+
+    for key, n in new_phones.items():
+        if key not in old_phones:
+            rows.append(_row(service, pair_idx, "", "PHONE",
+                             "", "", "", old_type,
+                             n["display"], "", "", new_type,
+                             "EXTRA on new"))
+
+    return rows
 
 
 def _compare_text_lists(service, pair_idx, old_label, new_label,
@@ -1138,10 +1263,13 @@ def _compare_buttons(service, pair_idx, old_btns, new_btns,
             status = "OK" if (o_href or "").strip() == (n_href or "").strip() else "EXPECTED"
         elif wave == 2:
             # Same visible text, href may differ. If hrefs are equal (or differ
-            # only cosmetically) it's OK; a genuinely different/removed href is
-            # a real change worth flagging.
+            # only cosmetically) it's OK; if they differ only by an EXPECTED
+            # rebuild transformation (slug shortening, site version) -> EXPECTED;
+            # otherwise a genuinely different href -> DIFFERS.
             if _normalize_href(o_href) == _normalize_href(n_href):
                 status = "OK" if (o_href or "").strip() == (n_href or "").strip() else "EXPECTED"
+            elif _hrefs_expected_equivalent(o_href, n_href):
+                status = "EXPECTED"
             else:
                 status = "DIFFERS"
         else:
@@ -1297,6 +1425,72 @@ def _normalize(s: str) -> str:
     # Drop a space that sits immediately before , . ; : ! ?
     out = re.sub(r"\s+([,.;:!?])", r"\1", out)
     return out
+
+
+def _href_path_and_query(href: str) -> tuple:
+    """Split a normalized href into (path, query) without scheme/host/fragment."""
+    h = _normalize_href(href)
+    # Strip fragment
+    h = h.split("#", 1)[0]
+    path, _, query = h.partition("?")
+    return path, query
+
+
+def _hrefs_expected_equivalent(old_href: str, new_href: str) -> bool:
+    """
+    True if two hrefs differ only in ways that are EXPECTED for a SpotHopper
+    rebuild, namely:
+
+      A) Slug shortening — the rebuild drops a long restaurant-name/location
+         prefix from the path, keeping the meaningful tail. The new slug's
+         last path segment equals the TAIL of the old slug's last segment:
+            /charleston-saveurs-du-monde-cafe-food-menu  ->  /food-menu
+            /charleston-...-location-westedge            ->  /location-westedge
+         (and the reverse direction, in case old is the short one).
+
+      B) Site-version difference — the URLs are identical except for a
+         "vN" version token, e.g. spot-sample-74405-website-v1 vs -v2, or a
+         callback_url that only differs by website-v1 vs website-v2.
+
+    Used to mark such pairs EXPECTED rather than DIFFERS.
+    """
+    o = _normalize_href(old_href)
+    n = _normalize_href(new_href)
+    if not o or not n:
+        return False
+    if o == n:
+        return False  # identical handled elsewhere (OK / cosmetic-EXPECTED)
+
+    # --- Rule B: differ only by a website-vN version token ---
+    # Replace any "website-vN" / "-vN-" / "vN" version markers with a constant
+    # and see if the URLs become equal.
+    def _strip_version(s: str) -> str:
+        s = re.sub(r"website-v\d+", "website-vX", s)
+        s = re.sub(r"(spot-sample-\d+-)v\d+", r"\1vX", s)
+        s = re.sub(r"[-_/]v\d+\b", "/vX", s)
+        return s
+    if _strip_version(o) == _strip_version(n):
+        return True
+
+    # --- Rule A: slug shortening on the path tail ---
+    o_path, o_query = _href_path_and_query(old_href)
+    n_path, n_query = _href_path_and_query(new_href)
+    # Only treat as slug-shortening when the query strings agree (ignoring
+    # the version handled above) — a different query is a real change.
+    if _strip_version(o_query) == _strip_version(n_query):
+        o_seg = o_path.rstrip("/").split("/")[-1]
+        n_seg = n_path.rstrip("/").split("/")[-1]
+        if o_seg and n_seg and o_seg != n_seg:
+            # The shorter segment must be a meaningful tail of the longer,
+            # aligned on a hyphen boundary (so "food-menu" matches
+            # "...-cafe-food-menu" but not "enu").
+            longer, shorter = (o_seg, n_seg) if len(o_seg) >= len(n_seg) else (n_seg, o_seg)
+            if longer.endswith(shorter) and len(shorter) >= 4:
+                boundary = longer[: -len(shorter)]
+                if boundary == "" or boundary.endswith("-"):
+                    return True
+
+    return False
 
 
 def _normalize_href(href: str) -> str:
