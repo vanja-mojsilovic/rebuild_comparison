@@ -330,6 +330,13 @@ def _is_hidden_anywhere(node) -> bool:
         cls = cursor.get("class") or []
         if any(c in ("hidden", "d-none", "invisible") for c in cls):
             return True
+        # Owl Carousel injects duplicate slides marked .cloned to fake an
+        # infinite loop. These are literal copies of real slides and must
+        # never be scraped — on some sites they carry aria-hidden, on others
+        # (e.g. the old SpotHopper template) they don't, so we key off the
+        # .cloned class directly.
+        if "cloned" in cls:
+            return True
         if cursor.get("aria-hidden", "").lower() == "true":
             return True
         if cursor.has_attr("hidden"):
@@ -535,7 +542,37 @@ def _section_data(el: Tag) -> dict:
 
     Key rule: text inside a clickable goes to `buttons` only — never
     duplicated in paragraph/heading buckets.
+
+    Review carousels are special-cased: the per-slide content (the
+    "review by - X" heading, the reviewer name, and the quote paragraph) is
+    NOT collected as ordinary heading/paragraph rows, because reviews are
+    compared separately as REVIEW rows (deduplicated across the whole
+    carousel). Only the section header (e.g. "Reviews") is kept. This avoids
+    asymmetry between the old template (which leaves inactive slides visible
+    in the DOM) and the new one (which hides them).
     """
+
+    # Detect a reviews carousel by its wrapper classes.
+    el_classes = " ".join(el.get("class") or [])
+    _is_review_carousel = "reviews-v2-wrapper" in el_classes or (
+        "carousel-wrapper" in el_classes and "review" in el_classes.lower()
+    )
+
+    def _in_review_slide(node: Tag) -> bool:
+        """True if node sits inside a carousel review slide (owl-item / item /
+        review-text), i.e. it's per-slide content rather than the section
+        header."""
+        if not _is_review_carousel:
+            return False
+        cursor = node.parent
+        while cursor is not None and isinstance(cursor, Tag):
+            if cursor is el:
+                return False
+            cls = cursor.get("class") or []
+            if any(c in ("owl-item", "review-text") or c == "item" for c in cls):
+                return True
+            cursor = cursor.parent
+        return False
 
     # --- 1. Find all clickables and mark their text as off-limits ---
     clickable_selector = 'a, button, [role="button"], [role="link"]'
@@ -589,14 +626,32 @@ def _section_data(el: Tag) -> dict:
     #         inactive slides, display:none blocks, etc.). ---
     def texts(tag_name: str) -> list:
         out = []
+        seen = set()
         for t in el.find_all(tag_name):
             if id(t) in off_limits:
                 continue
             if _is_hidden_anywhere(t):
                 continue
+            # In a reviews carousel, skip per-slide content (review-by heading,
+            # reviewer name, quote paragraph) — those are reported as REVIEW
+            # rows instead. Keep only the section header.
+            if _in_review_slide(t):
+                continue
             text_value = _text_excluding_clickables(t)
-            if text_value:
-                out.append(text_value)
+            if not text_value:
+                continue
+            # De-duplicate identical text within the same section. Carousels
+            # render several slides at once (only one "active"), and on the
+            # old template the inactive slides aren't marked hidden, so the
+            # same "review by - Yelp" heading would otherwise be collected
+            # many times. Collapsing duplicates keeps one row per distinct
+            # heading/paragraph and aligns old vs new (where the new template
+            # hides inactive slides and yields one already).
+            key = text_value.strip().lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(text_value)
         return out
 
     # Hidden (screen-reader-only) text per heading, keyed by the heading's
@@ -609,6 +664,8 @@ def _section_data(el: Tag) -> dict:
             if id(t) in off_limits:
                 continue
             if _is_hidden_anywhere(t):
+                continue
+            if _in_review_slide(t):
                 continue
             visible = _text_excluding_clickables(t)
             if not visible:
