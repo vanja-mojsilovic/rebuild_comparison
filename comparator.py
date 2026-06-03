@@ -1058,73 +1058,112 @@ def _compare_buttons(service, pair_idx, old_btns, new_btns,
     old_btns = [b for b in old_btns if not _social_network(b)]
     new_btns = [b for b in new_btns if not _social_network(b)]
 
+    # ----------------------------------------------------------------
+    # Match remaining real buttons in ORDERED WAVES so the strongest
+    # signal wins before weaker fallbacks consume a button. Processing one
+    # old button at a time (full-match-then-partial) let an early old button
+    # grab a loose visible-text match that a later old button would have
+    # matched exactly, scrambling the pairings — especially on messy contact
+    # sections where the new template mislabels phone/email buttons.
+    #
+    # Wave 1: exact match on (visible text AND href)         -> OK / EXPECTED
+    # Wave 2: href matches (visible text changed)            -> OK / EXPECTED
+    # Wave 3: visible text matches (href changed or empty)   -> DIFFERS
+    # Leftover old -> MISSING; leftover new -> EXTRA/EXPECTED
+    # ----------------------------------------------------------------
+    old_remaining = list(old_btns)
     new_remaining = list(new_btns)
+    matched_pairs = []  # (old_btn, new_btn, wave)
 
-    for o in old_btns:
-        o_visible = (o.get("visible_text") or o.get("text") or "")
-        o_hidden = o.get("hidden_text", "")
-        o_href = o.get("href", "")
-        o_norm = (_normalize(o_visible), _normalize_href(o_href))
-
-        matched: Optional[dict] = None
+    def _take_match(o, predicate):
         for n in new_remaining:
-            n_visible = (n.get("visible_text") or n.get("text") or "")
-            n_href = n.get("href", "")
-            if (_normalize(n_visible), _normalize_href(n_href)) == o_norm:
-                matched = n
-                break
+            if predicate(o, n):
+                return n
+        return None
 
-        if matched is not None:
-            new_remaining.remove(matched)
-            n_href_matched = matched.get("href", "")
-            # Identical raw href -> OK. Matched only after normalization
-            # (e.g. the new link added a trailing "#", dropped www., or a
-            # trailing slash) -> EXPECTED: a cosmetic rebuild change, not a
-            # real difference.
-            btn_status = "OK" if (o_href or "").strip() == (n_href_matched or "").strip() else "EXPECTED"
-            rows.append(_row(service, pair_idx, "BUTTON", "BUTTON",
-                             o_visible, o_href, o_hidden, old_type,
-                             matched.get("visible_text", "") or matched.get("text", ""),
-                             n_href_matched,
-                             matched.get("hidden_text", ""),
-                             new_type,
-                             btn_status))
-        else:
-            # Look for visible-text match with different href → still differs but pair them
-            partial: Optional[dict] = None
-            for n in new_remaining:
-                n_visible = (n.get("visible_text") or n.get("text") or "")
-                if _normalize(n_visible) == _normalize(o_visible):
-                    partial = n
-                    break
-            if partial is not None:
-                new_remaining.remove(partial)
-                rows.append(_row(service, pair_idx, "BUTTON", "BUTTON",
-                                 o_visible, o_href, o_hidden, old_type,
-                                 partial.get("visible_text", "") or partial.get("text", ""),
-                                 partial.get("href", ""),
-                                 partial.get("hidden_text", ""),
-                                 new_type,
-                                 "DIFFERS"))
-            elif new_remaining:
-                n = new_remaining.pop(0)
-                rows.append(_row(service, pair_idx, "BUTTON", "BUTTON",
-                                 o_visible, o_href, o_hidden, old_type,
-                                 n.get("visible_text", "") or n.get("text", ""),
-                                 n.get("href", ""),
-                                 n.get("hidden_text", ""),
-                                 new_type,
-                                 "DIFFERS"))
+    # Wave 1: exact (visible, href)
+    for o in list(old_remaining):
+        o_vis = _normalize(o.get("visible_text") or o.get("text") or "")
+        o_hrefn = _normalize_href(o.get("href", ""))
+        n = _take_match(o, lambda o, n:
+                        _normalize(n.get("visible_text") or n.get("text") or "") == o_vis and
+                        _normalize_href(n.get("href", "")) == o_hrefn)
+        if n is not None:
+            old_remaining.remove(o)
+            new_remaining.remove(n)
+            matched_pairs.append((o, n, 1))
+
+    # Wave 2: visible text matches (href may differ or be empty). Visible text
+    # is the more trustworthy identity for contact buttons, because rebuilt
+    # templates sometimes scramble hrefs (a phone-labeled button linking to the
+    # email, an email button with no href). Matching the labels first keeps
+    # email<->email and phone<->phone aligned.
+    for o in list(old_remaining):
+        o_vis = _normalize(o.get("visible_text") or o.get("text") or "")
+        if not o_vis:
+            continue
+        n = _take_match(o, lambda o, n:
+                        _normalize(n.get("visible_text") or n.get("text") or "") == o_vis)
+        if n is not None:
+            old_remaining.remove(o)
+            new_remaining.remove(n)
+            matched_pairs.append((o, n, 2))
+
+    # Wave 3: href matches (non-empty), visible text differs
+    for o in list(old_remaining):
+        o_hrefn = _normalize_href(o.get("href", ""))
+        if not o_hrefn:
+            continue
+        n = _take_match(o, lambda o, n:
+                        _normalize_href(n.get("href", "")) == o_hrefn)
+        if n is not None:
+            old_remaining.remove(o)
+            new_remaining.remove(n)
+            matched_pairs.append((o, n, 3))
+
+    # Emit matched pairs (preserve original old order for readability)
+    order = {id(o): i for i, o in enumerate(old_btns)}
+    matched_pairs.sort(key=lambda t: order.get(id(t[0]), 0))
+    for o, n, wave in matched_pairs:
+        o_vis = o.get("visible_text") or o.get("text") or ""
+        o_href = o.get("href", "")
+        o_hidden = o.get("hidden_text", "")
+        n_vis = n.get("visible_text") or n.get("text") or ""
+        n_href = n.get("href", "")
+        n_hidden = n.get("hidden_text", "")
+
+        if wave == 1:
+            # Exact visible+href (after normalization). Identical raw href -> OK;
+            # matched only after href normalization (trailing #, www., slash) -> EXPECTED.
+            status = "OK" if (o_href or "").strip() == (n_href or "").strip() else "EXPECTED"
+        elif wave == 2:
+            # Same visible text, href may differ. If hrefs are equal (or differ
+            # only cosmetically) it's OK; a genuinely different/removed href is
+            # a real change worth flagging.
+            if _normalize_href(o_href) == _normalize_href(n_href):
+                status = "OK" if (o_href or "").strip() == (n_href or "").strip() else "EXPECTED"
             else:
-                rows.append(_row(service, pair_idx, "BUTTON", "",
-                                 o_visible, o_href, o_hidden, old_type,
-                                 "", "", "", new_type,
-                                 "MISSING on new"))
+                status = "DIFFERS"
+        else:
+            # Wave 3: same href, visible label changed (e.g. "Twitter page" ->
+            # "Twitter/ X page"). The link is the identity, so a label-only
+            # change reads OK.
+            status = "OK"
+        rows.append(_row(service, pair_idx, "BUTTON", "BUTTON",
+                         o_vis, o_href, o_hidden, old_type,
+                         n_vis, n_href, n_hidden, new_type,
+                         status))
 
+    # Leftover old buttons -> MISSING on new
+    for o in old_remaining:
+        rows.append(_row(service, pair_idx, "BUTTON", "",
+                         o.get("visible_text", "") or o.get("text", ""),
+                         o.get("href", ""), o.get("hidden_text", ""), old_type,
+                         "", "", "", new_type,
+                         "MISSING on new"))
+
+    # Leftover new buttons -> EXTRA, unless they're template affordances -> EXPECTED
     for n in new_remaining:
-        # A template-added affordance (Skip Photo Gallery, Reset zoom, etc.)
-        # that exists only on the new side is an EXPECTED template addition,
-        # not a real extra button.
         status = "EXPECTED" if _is_expected_affordance(n) else "EXTRA on new"
         rows.append(_row(service, pair_idx, "", "BUTTON",
                          "", "", "", old_type,
