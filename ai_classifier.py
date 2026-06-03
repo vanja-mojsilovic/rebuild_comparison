@@ -361,7 +361,7 @@ def classify_sections_pair(restaurant: str, old_sections: list, new_sections: li
         response = client.chat.completions.create(
             model=OPENAI_MODEL,
             messages=[{"role": "user", "content": prompt}],
-            **_token_limit_kwarg(2000),
+            **_token_limit_kwarg(16000),
         )
     except Exception as e:
         print(f"[ai_classifier] OpenAI call failed: {e}", file=sys.stderr)
