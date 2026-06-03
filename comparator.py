@@ -50,26 +50,15 @@ SERVICE_RULES = [
 ]
 
 
-# Element types compared, with the heading shift baked in:
-# Each tuple is (old_field, new_field, old_label, new_label).
-# old_label / new_label are written to the report's Old element / New element
-# columns respectively.
-#
-# Headings are handled SEPARATELY (see _compare_headings) because a rebuild
-# may or may not shift heading levels (H1->H2->H3). Rather than assume a fixed
-# shift, we pool all headings on each side and match by text at ANY level —
-# so "HOMESTYLE CATERING" as an old H2 matches the same text whether it's an
-# H2 or H3 on the new side. This avoids false EXTRA/MISSING/DIFFERS rows when
-# the levels happen to line up (e.g. identical old and new URLs).
-#
-# Only the non-heading element types are driven by this table now.
+# Heading + paragraph text is compared by _compare_text_elements (the SEO
+# demotion model). The only element type still compared straight
+# level-to-level here is list_items, which isn't part of the heading ladder.
 COMPARISON_FIELDS = [
-    ("paragraphs", "paragraphs", "P", "P"),
     ("list_items", "list_items", "LI", "LI"),
 ]
 
 # Heading levels pooled together for the level-agnostic comparison.
-HEADING_FIELDS = ("h1", "h2", "h3")
+HEADING_FIELDS = ("h1", "h2", "h3", "h4")
 
 
 # Default when a section dict pre-dates the html_element_type field
@@ -155,7 +144,7 @@ def _html_type(section: Optional[dict]) -> str:
 def _section_signature(section: dict) -> set:
     """Build a bag of normalized tokens representing the section's content."""
     tokens = set()
-    for field in ("h1", "h2", "h3", "paragraphs", "list_items"):
+    for field in ("h1", "h2", "h3", "h4", "paragraphs", "list_items"):
         for text in section.get(field, []):
             tokens.update(_normalize(text).split())
     for btn in section.get("buttons", []):
@@ -306,7 +295,7 @@ def _primary_heading(section: dict) -> str:
     level are joined with " | " so reviewers can spot multi-h1 sections (e.g.
     a contact block with both "Location" and "Find us on") at a glance.
     """
-    for level in ("h1", "h2", "h3"):
+    for level in ("h1", "h2", "h3", "h4"):
         values = [v.strip() for v in section.get(level, []) if v and v.strip()]
         if values:
             return " | ".join(values)
@@ -453,31 +442,35 @@ def build_validated_rows(old_data: dict, new_data: dict) -> list:
     """
     Produce a flat list of comparison rows for the report tab.
 
+    Pairing strategy
+    ----------------
+    Sections are paired by CONTENT SIMILARITY across the whole page, NOT by
+    grouping on the service label first. This matters because the same logical
+    section can get different labels on the old vs new site (e.g. the AI calls
+    the old one "about us" and the new one "food menu"). Label-first grouping
+    would then drop them into separate buckets and emit a spurious
+    MISSING-on-new plus EXTRA-on-new pair for what is really one matched
+    section. Content-based pairing matches them by their shared headings /
+    paragraphs / button text instead, so they line up correctly.
+
     Each row dict has:
-        service           — classified service name
-        section_pair      — pair index within service
-        old_element       — H1, H2, H3, P, LI, BUTTON, REVIEW (or empty)
-        new_element       — H1, H2, H3, P, LI, BUTTON, REVIEW (or empty)
+        service           — the pair's service label (old side's label
+                            preferred; the non-"other" side wins when they
+                            disagree)
+        section_pair      — running pair index
+        old_element / new_element — H1, H2, H3, P, LI, BUTTON, REVIEW (or "")
         old_text, old_href, old_hidden, old_html_type
         new_text, new_href, new_hidden, new_html_type
         match             — "OK" / "MISSING on new" / "EXTRA on new" / "DIFFERS"
-
-    Heading shifts (H1→H2, H2→H3) are represented by giving the row different
-    values in old_element and new_element columns. There is no arrow syntax.
     """
-    old_by_svc = group_by_service(old_data["sections"])
-    new_by_svc = group_by_service(new_data["sections"])
+    old_sections = list(old_data.get("sections", []))
+    new_sections = list(new_data.get("sections", []))
 
-    all_services = sorted(set(list(old_by_svc.keys()) + list(new_by_svc.keys())))
+    pairs = _pair_sections_global(old_sections, new_sections)
     rows = []
-
-    for service in all_services:
-        old_sections = old_by_svc.get(service, [])
-        new_sections = new_by_svc.get(service, [])
-
-        pairs = pair_sections(old_sections, new_sections)
-        for pair_idx, (old_sec, new_sec) in enumerate(pairs, start=1):
-            rows.extend(_compare_section_pair(service, pair_idx, old_sec, new_sec))
+    for pair_idx, (old_sec, new_sec) in enumerate(pairs, start=1):
+        service = _pair_service_label(old_sec, new_sec)
+        rows.extend(_compare_section_pair(service, pair_idx, old_sec, new_sec))
 
     # Reviews are compared once across the page (not per-section)
     rows.extend(_compare_reviews(old_data.get("reviews", []), new_data.get("reviews", [])))
@@ -485,62 +478,176 @@ def build_validated_rows(old_data: dict, new_data: dict) -> list:
     return rows
 
 
+# Minimum content overlap (Jaccard on token sets) for two sections to be
+# considered the same logical section across old/new. Below this, sections
+# are treated as genuinely unmatched (one MISSING, the other EXTRA).
+_PAIR_MATCH_THRESHOLD = 0.12
+
+
+def _pair_service_label(old_sec, new_sec) -> str:
+    """
+    Decide the service label to display for a matched pair. Prefer the old
+    side's label; if it's empty/"other", use the new side's; if both are
+    set but disagree, prefer the more specific (non-"other") one, defaulting
+    to the old side.
+    """
+    old_lbl = classify_service(old_sec) if old_sec is not None else ""
+    new_lbl = classify_service(new_sec) if new_sec is not None else ""
+    if old_lbl and old_lbl != "other":
+        return old_lbl
+    if new_lbl and new_lbl != "other":
+        return new_lbl
+    return old_lbl or new_lbl or "other"
+
+
+def _pair_sections_global(old_list: list, new_list: list) -> list:
+    """
+    Pair old and new sections across the WHOLE page by content similarity.
+
+    Greedy best-match: compute similarity for every (old, new) pair, then
+    repeatedly take the highest-scoring available pair above the threshold.
+    Leftover sections on either side become unpaired (None on the other side).
+    Document order is preserved in the output as much as possible by sorting
+    final pairs on the old section's original index (then new index).
+    """
+    old_sigs = [(i, sec, _section_signature(sec)) for i, sec in enumerate(old_list)]
+    new_sigs = [(j, sec, _section_signature(sec)) for j, sec in enumerate(new_list)]
+
+    # Score every candidate pair
+    candidates = []  # (score, old_idx, new_idx)
+    for i, o_sec, o_sig in old_sigs:
+        for j, n_sec, n_sig in new_sigs:
+            score = _similarity(o_sig, n_sig)
+            if score >= _PAIR_MATCH_THRESHOLD:
+                candidates.append((score, i, j))
+    candidates.sort(reverse=True)  # highest similarity first
+
+    used_old = set()
+    used_new = set()
+    matched = []  # (old_idx, new_idx)
+    for score, i, j in candidates:
+        if i in used_old or j in used_new:
+            continue
+        used_old.add(i)
+        used_new.add(j)
+        matched.append((i, j))
+
+    pairs = []
+    # Matched pairs
+    for i, j in matched:
+        pairs.append((i, j, old_list[i], new_list[j]))
+    # Unmatched old → MISSING on new
+    for i, o_sec, _ in old_sigs:
+        if i not in used_old:
+            pairs.append((i, -1, o_sec, None))
+    # Unmatched new → EXTRA on new
+    for j, n_sec, _ in new_sigs:
+        if j not in used_new:
+            pairs.append((10_000 + j, j, None, n_sec))
+
+    # Keep document order roughly intact: sort by old index, then new index
+    pairs.sort(key=lambda t: (t[0], t[1]))
+    return [(o, n) for (_, _, o, n) in pairs]
+
+
 def _headings_with_levels(section: dict) -> list:
     """
-    Return a section's headings as (text, level_label) tuples in H1, H2, H3
-    order. level_label is "H1" / "H2" / "H3".
+    Return a section's headings as (text, level_label) tuples in H1..H4
+    order. level_label is "H1" / "H2" / "H3" / "H4". (Kept for the
+    one-side-missing branch and any external callers.)
     """
     out = []
-    for field, label in (("h1", "H1"), ("h2", "H2"), ("h3", "H3")):
+    for field, label in (("h1", "H1"), ("h2", "H2"), ("h3", "H3"), ("h4", "H4")):
         for text in section.get(field, []):
             if text and text.strip():
                 out.append((text, label))
     return out
 
 
-def _compare_headings(service, pair_idx, old_sec, new_sec,
-                      old_type, new_type) -> list:
+# Rank ladder for the SEO heading-demotion model. Lower number = more
+# prominent. A rebuild aimed at SEO keeps a single H1 and pushes the rest
+# DOWN the ladder (H1->H2->H3->H4, and sometimes a heading all the way to a
+# paragraph). Moving DOWN with the same text is the EXPECTED, intended change.
+# Moving UP, or staying put, still counts as the text having survived (OK).
+_RANK = {"H1": 1, "H2": 2, "H3": 3, "H4": 4, "P": 5}
+
+
+def _text_elements_with_rank(section: dict) -> list:
     """
-    Compare headings between two sections WITHOUT assuming a fixed level shift.
+    Pool a section's heading + paragraph text into a single ordered list of
+    (text, label, rank) tuples, where label is "H1".."H4" or "P" and rank is
+    the position on the demotion ladder (H1=1 .. P=5).
 
-    An old heading matches a new heading purely on normalized text, regardless
-    of whether it sits at H1/H2/H3 on either side. This handles both rebuild
-    styles: ones that shift levels (old H1 -> new H2) and ones that keep them
-    (old H2 -> new H2, e.g. identical pages). The element-label columns still
-    record the actual level each heading was found at, so a level change is
-    visible in the report even though it's reported as OK on text.
+    Headings and paragraphs are pooled TOGETHER so we can detect a heading
+    that was demoted into a paragraph during the rebuild (e.g. old H2 whose
+    text now appears as a new <p>).
+    """
+    out = []
+    for field, label in (("h1", "H1"), ("h2", "H2"), ("h3", "H3"), ("h4", "H4"),
+                         ("paragraphs", "P")):
+        for text in section.get(field, []):
+            if text and text.strip():
+                out.append((text, label, _RANK[label]))
+    return out
 
-    Match outcomes:
-      - text present on both sides  -> OK
-      - old heading text not on new -> MISSING on new
-      - new heading text not on old -> EXTRA on new
+
+def _move_match_status(old_rank: int, new_rank: int) -> str:
+    """
+    Classify a same-text match by how the element's rank changed:
+      - same rank          -> "OK"        (no change)
+      - moved DOWN (new>old)-> "EXPECTED" (intended SEO demotion)
+      - moved UP   (new<old)-> "OK"       (text survived; unusual but fine)
+    """
+    if new_rank == old_rank:
+        return "OK"
+    if new_rank > old_rank:
+        return "EXPECTED"
+    return "OK"
+
+
+def _compare_text_elements(service, pair_idx, old_sec, new_sec,
+                           old_type, new_type) -> list:
+    """
+    Unified comparison of all heading + paragraph text across two sections,
+    using the SEO heading-demotion model.
+
+    Both sides' H1-H4 and P text are pooled and matched by normalized text.
+    For a matched pair the status reflects the rank movement:
+        same level                 -> OK
+        moved down (incl. ->P)     -> EXPECTED   (intended SEO change)
+        moved up                   -> OK
+    Unmatched old text             -> MISSING on new
+    Unmatched new text             -> EXTRA on new
+
+    The Old element / New element columns record the actual levels (e.g.
+    "H2" and "P") so a reviewer can see exactly how a heading moved.
     """
     rows = []
-    old_headings = _headings_with_levels(old_sec)
-    new_headings = _headings_with_levels(new_sec)
+    old_items = _text_elements_with_rank(old_sec)
+    new_items = _text_elements_with_rank(new_sec)
+    new_remaining = list(new_items)
 
-    new_remaining = list(new_headings)
-
-    for o_text, o_label in old_headings:
+    for o_text, o_label, o_rank in old_items:
         o_norm = _normalize(o_text)
         matched_idx = None
-        for idx, (n_text, n_label) in enumerate(new_remaining):
+        for idx, (n_text, n_label, n_rank) in enumerate(new_remaining):
             if _normalize(n_text) == o_norm:
                 matched_idx = idx
                 break
         if matched_idx is not None:
-            n_text, n_label = new_remaining.pop(matched_idx)
+            n_text, n_label, n_rank = new_remaining.pop(matched_idx)
+            status = _move_match_status(o_rank, n_rank)
             rows.append(_row(service, pair_idx, o_label, n_label,
                              o_text, "", "", old_type,
                              n_text, "", "", new_type,
-                             "OK"))
+                             status))
         else:
             rows.append(_row(service, pair_idx, o_label, "",
                              o_text, "", "", old_type,
                              "", "", "", new_type,
                              "MISSING on new"))
 
-    for n_text, n_label in new_remaining:
+    for n_text, n_label, n_rank in new_remaining:
         rows.append(_row(service, pair_idx, "", n_label,
                          "", "", "", old_type,
                          n_text, "", "", new_type,
@@ -562,8 +669,8 @@ def _compare_section_pair(service, pair_idx, old_sec, new_sec) -> list:
         present = old_sec or new_sec
         side_missing = "old" if old_sec is None else "new"
 
-        # Headings on the present side (each at its real level)
-        for text, label in _headings_with_levels(present):
+        # Heading + paragraph text on the present side (each at its real level)
+        for text, label, _rank in _text_elements_with_rank(present):
             if side_missing == "old":
                 out.append(_row(service, pair_idx, "", label,
                                 "", "", "", old_type,
@@ -575,7 +682,7 @@ def _compare_section_pair(service, pair_idx, old_sec, new_sec) -> list:
                                 "", "", "", new_type,
                                 "MISSING on new"))
 
-        # Paragraphs / list items on the present side
+        # List items on the present side
         for (o_field, n_field, o_label, n_label) in COMPARISON_FIELDS:
             field = o_field if old_sec is None else n_field  # use whichever side exists
             for text in present.get(field, []):
@@ -606,10 +713,12 @@ def _compare_section_pair(service, pair_idx, old_sec, new_sec) -> list:
         return out
 
     # Both sections exist.
-    # Headings: level-agnostic text match (handles shifted and unshifted rebuilds)
-    out.extend(_compare_headings(service, pair_idx, old_sec, new_sec, old_type, new_type))
+    # Headings + paragraphs: unified comparison with the SEO demotion model
+    # (same level = OK, moved down / to paragraph = EXPECTED, moved up = OK).
+    out.extend(_compare_text_elements(service, pair_idx, old_sec, new_sec, old_type, new_type))
 
-    # Paragraphs and list items: straight level-to-level comparison
+    # List items: straight level-to-level comparison (not part of the
+    # heading demotion ladder).
     for (o_field, n_field, o_label, n_label) in COMPARISON_FIELDS:
         old_texts = old_sec.get(o_field, [])
         new_texts = new_sec.get(n_field, [])

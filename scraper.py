@@ -589,10 +589,11 @@ def _section_data(el: Tag) -> dict:
     h1 = texts("h1")
     h2 = texts("h2")
     h3 = texts("h3")
+    h4 = texts("h4")
     paragraphs = texts("p")
     list_items = texts("li")
 
-    headings = h1 + h2 + h3
+    headings = h1 + h2 + h3 + h4
     raw_text = _clean_text(el.get_text(separator=" "))
 
     return {
@@ -600,6 +601,7 @@ def _section_data(el: Tag) -> dict:
         "h1": h1,
         "h2": h2,
         "h3": h3,
+        "h4": h4,
         "paragraphs": paragraphs,
         "list_items": list_items,
         "buttons": buttons,
