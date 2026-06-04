@@ -106,9 +106,39 @@ SEO_RANGE = f"{SEO_TAB}!A:H"
 SEO_HEADER_RANGE = f"{SEO_TAB}!A1:H1"
 
 
-# 'custom' tab — typo / strange-content + review-rule checks on the NEW site's
-# home-page sections and reviews.
+# 'custom' tab — old↔new COMPARISON of the custom pages (press / locations /
+# parties / cater / reserve / about), using the same engine as the report tab.
+# Same columns as the report plus a leading "Page" column so each row shows
+# which custom page it came from.
 CUSTOM_HEADERS = [
+    "Page",            # press / locations / parties / cater / reserve / about
+    "Run timestamp",
+    "Restaurant",
+    "Old URL",
+    "New URL",
+    "Old site section name",
+    "New site section name",
+    "Old element",
+    "Old text",
+    "Old href",
+    "Old hidden",
+    "Old HTML type",
+    "New element",
+    "New text",
+    "New href",
+    "New hidden",
+    "New HTML type",
+    "Match",
+]
+# Custom tab spans 18 columns → A:R
+CUSTOM_RANGE = f"{CUSTOM_TAB}!A:R"
+CUSTOM_HEADER_RANGE = f"{CUSTOM_TAB}!A1:R1"
+
+
+# 'content' tab — typo / strange-content + review-rule checks on the NEW
+# site's HOME-page sections and reviews (the validation that previously
+# lived in the custom tab).
+CONTENT_HEADERS = [
     "Restaurant name",
     "Run timestamp",
     "Source",          # "section" or "review"
@@ -117,26 +147,9 @@ CUSTOM_HEADERS = [
     "Status",          # OK / POTENTIAL ISSUE
     "Detail",
 ]
-# Custom tab spans 7 columns → A:G
-CUSTOM_RANGE = f"{CUSTOM_TAB}!A:G"
-CUSTOM_HEADER_RANGE = f"{CUSTOM_TAB}!A1:G1"
-
-
-# 'content' tab — typo / a11y checks on the NEW site's OTHER relevant pages
-# (about / cater / parties / reserve / locations).
-CONTENT_HEADERS = [
-    "Restaurant name",
-    "Run timestamp",
-    "Page",            # about / cater / parties / reserve / locations
-    "Page URL",
-    "Section type",
-    "Heading",
-    "Status",          # OK / POTENTIAL ISSUE
-    "Detail",
-]
-# Content tab spans 8 columns → A:H
-CONTENT_RANGE = f"{CONTENT_TAB}!A:H"
-CONTENT_HEADER_RANGE = f"{CONTENT_TAB}!A1:H1"
+# Content tab spans 7 columns → A:G
+CONTENT_RANGE = f"{CONTENT_TAB}!A:G"
+CONTENT_HEADER_RANGE = f"{CONTENT_TAB}!A1:G1"
 
 
 def get_sheets_service():
@@ -327,9 +340,40 @@ def build_seo_tab_rows(restaurant, timestamp, old_data, new_data):
 
 # ----- Append helpers ----------------------------------------------------
 
-def build_custom_tab_rows(restaurant, timestamp, section_results, review_results):
+def build_custom_tab_rows(page, timestamp, restaurant, old_url, new_url, comparison_rows):
     """
-    Rows for the 'custom' tab: typo/strange-content findings on the new site's
+    Rows for the 'custom' tab: an old↔new comparison of one custom page
+    (press / locations / ...). Same layout as the report tab, prefixed with a
+    Page column. comparison_rows comes from build_validated_rows().
+    """
+    out = []
+    for r in comparison_rows:
+        out.append([
+            page,
+            timestamp,
+            restaurant,
+            old_url,
+            new_url,
+            r.get("old_section_name", r.get("service", "")),
+            r.get("new_section_name", r.get("service", "")),
+            r.get("old_element", ""),
+            r.get("old_text", ""),
+            r.get("old_href", ""),
+            r.get("old_hidden", ""),
+            r.get("old_html_type", ""),
+            r.get("new_element", ""),
+            r.get("new_text", ""),
+            r.get("new_href", ""),
+            r.get("new_hidden", ""),
+            r.get("new_html_type", ""),
+            r.get("match", ""),
+        ])
+    return out
+
+
+def build_content_tab_rows(restaurant, timestamp, section_results, review_results):
+    """
+    Rows for the 'content' tab: typo/strange-content findings on the new site's
     home sections, plus review-rule findings. section_results and
     review_results are the lists returned by content_validator.
     """
@@ -354,31 +398,6 @@ def build_custom_tab_rows(restaurant, timestamp, section_results, review_results
             r.get("status", ""),
             r.get("issue", ""),
         ])
-    return out
-
-
-def build_content_tab_rows(restaurant, timestamp, page_results):
-    """
-    Rows for the 'content' tab: typo/a11y findings on the new site's other
-    relevant pages. page_results is a list of
-        {"page": kind, "url": url, "results": [section_result, ...]}
-    as assembled by the runner.
-    """
-    out = []
-    for page in page_results or []:
-        kind = page.get("page", "")
-        url = page.get("url", "")
-        for r in page.get("results", []):
-            out.append([
-                restaurant,
-                timestamp,
-                kind,
-                url,
-                r.get("service_type", ""),
-                (r.get("heading", "") or "")[:300],
-                r.get("status", ""),
-                r.get("issue", ""),
-            ])
     return out
 
 
@@ -493,43 +512,57 @@ def main():
             )
             append_to_seo(sheets, spreadsheet_id, seo_rows)
 
-            # ---- custom tab (NEW site only): typo / strange-content checks on
-            #      home sections + review-rule checks. Skipped silently if the
-            #      OpenAI key/SDK is unavailable (returns []).
-            custom_section_results = validate_sections(
+            # ---- custom tab: old↔new COMPARISON of the custom pages
+            #      (press / locations / parties / cater / reserve / about).
+            #      A page is compared only when it exists in BOTH the old and
+            #      new navs. Each side's URL comes from that side's own nav.
+            old_pages = find_relevant_page_urls(old_data)
+            new_pages = find_relevant_page_urls(new_data)
+            shared_kinds = [k for k in new_pages if k in old_pages]
+            custom_total = 0
+            for kind in shared_kinds:
+                o_url = old_pages[kind]
+                n_url = new_pages[kind]
+                try:
+                    o_page = scrape_page(o_url)
+                    n_page = scrape_page(n_url)
+                except Exception as pe:
+                    print(f"    custom: failed to scrape {kind} "
+                          f"({o_url} / {n_url}): {pe}", flush=True)
+                    continue
+                # Re-use the AI classifier so the custom-page comparison gets
+                # the same ordinal section names as the report tab.
+                page_ai = classify_sections_pair(
+                    restaurant,
+                    o_page.get("sections", []),
+                    n_page.get("sections", []),
+                )
+                for idx, sec in enumerate(o_page.get("sections", [])):
+                    lbl = page_ai.get(f"old_{idx}")
+                    if lbl:
+                        sec["ai_service"] = lbl
+                for idx, sec in enumerate(n_page.get("sections", [])):
+                    lbl = page_ai.get(f"new_{idx}")
+                    if lbl:
+                        sec["ai_service"] = lbl
+                page_rows = build_validated_rows(o_page, n_page)
+                custom_rows = build_custom_tab_rows(
+                    kind, timestamp, restaurant, o_url, n_url, page_rows
+                )
+                append_to_custom(sheets, spreadsheet_id, custom_rows)
+                custom_total += len(custom_rows)
+
+            # ---- content tab (NEW site only): typo / strange-content checks on
+            #      the HOME-page sections + review-rule checks. Skipped silently
+            #      if the OpenAI key/SDK is unavailable (returns []).
+            content_section_results = validate_sections(
                 restaurant, new_data.get("sections", [])
             )
-            custom_review_results = validate_reviews(
+            content_review_results = validate_reviews(
                 restaurant, new_data.get("reviews", [])
             )
-            custom_rows = build_custom_tab_rows(
-                restaurant, timestamp, custom_section_results, custom_review_results
-            )
-            append_to_custom(sheets, spreadsheet_id, custom_rows)
-
-            # ---- content tab (NEW site only): validate the OTHER relevant
-            #      pages (about / cater / parties / reserve / locations) found
-            #      via the new site's nav links.
-            content_page_results = []
-            relevant = find_relevant_page_urls(new_data)
-            for kind, page_url in relevant.items():
-                try:
-                    page_data = scrape_page(page_url)
-                except Exception as pe:
-                    print(f"    content: failed to scrape {kind} ({page_url}): {pe}",
-                          flush=True)
-                    continue
-                page_section_results = validate_sections(
-                    restaurant, page_data.get("sections", [])
-                )
-                if page_section_results:
-                    content_page_results.append({
-                        "page": kind,
-                        "url": page_url,
-                        "results": page_section_results,
-                    })
             content_rows = build_content_tab_rows(
-                restaurant, timestamp, content_page_results
+                restaurant, timestamp, content_section_results, content_review_results
             )
             append_to_content(sheets, spreadsheet_id, content_rows)
 
@@ -538,7 +571,8 @@ def main():
             ai_mark = "✓" if ai_labels else "✗"
             print(f"  ✓ report: {len(report_rows)} rows (OK: {ok}, issues: {issues})  "
                   f"sections: {len(sections_rows)} (ai {ai_mark})  seo: {len(seo_rows)}  "
-                  f"custom: {len(custom_rows)}  content: {len(content_rows)}",
+                  f"custom: {custom_total} ({len(shared_kinds)} pages)  "
+                  f"content: {len(content_rows)}",
                   flush=True)
         except Exception as e:
             failures += 1
