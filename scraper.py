@@ -894,6 +894,60 @@ def collect_all_links(soup: BeautifulSoup) -> list:
     return out
 
 
+# Characteristic slug fragments for the "other relevant pages" content check.
+# Matching is a substring test of the bare fragment against the URL path, so a
+# fragment like "cater" matches "/catering", "parties" matches
+# "/private-parties-page", "reserve" matches "/reservations", and "locations"
+# matches "/our-locations". Order matters only for display.
+RELEVANT_PAGE_SLUGS = {
+    "about":     "about",
+    "cater":     "cater",
+    "parties":   "parties",
+    "reserve":   "reserv",   # matches both "reserve" and "reservations"
+    "locations": "location",  # matches "location" and "locations"
+    "press":     "press",
+}
+
+
+def find_relevant_page_urls(page_data: dict) -> dict:
+    """
+    From a scraped page's `all_links`, find the URLs of the other relevant
+    pages (about / cater / parties / reserve / locations) by matching the
+    characteristic slug fragment in each link's href path.
+
+    Returns {page_kind: absolute_url} for the kinds found. Relative hrefs are
+    resolved against the page's base_url. When several links match a kind, the
+    first one in document order wins. Matching is a substring test on the path,
+    so "/catering", "/private-parties-page", "/reservations", "/our-locations"
+    all match their respective kinds. Off-site links (different host) and
+    non-navigational schemes (mailto/tel/#) are ignored.
+    """
+    from urllib.parse import urljoin, urlparse
+
+    base = page_data.get("base_url", "") or ""
+    base_host = urlparse(base).netloc.lower().lstrip("www.") if base else ""
+    found = {}
+    for link in page_data.get("all_links", []):
+        href = (link.get("href") or "").strip()
+        if not href or href.startswith(("#", "mailto:", "tel:", "javascript:")):
+            continue
+        absolute = urljoin(base, href)
+        parsed = urlparse(absolute)
+        path = parsed.path.lower().rstrip("/")
+        if not path:
+            continue
+        # Stay on the same site (ignore external order/booking domains).
+        host = parsed.netloc.lower().lstrip("www.")
+        if base_host and host and host != base_host:
+            continue
+        for kind, frag in RELEVANT_PAGE_SLUGS.items():
+            if kind in found:
+                continue
+            if frag in path:
+                found[kind] = absolute
+    return found
+
+
 def _is_visually_hidden(node) -> bool:
     """True if the element carries a known accessibility-hidden class."""
     if not isinstance(node, Tag):
