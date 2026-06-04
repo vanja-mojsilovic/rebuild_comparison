@@ -212,6 +212,39 @@ _HTML_TYPE_LABELS = {
 }
 
 
+def assign_section_ordinals(sections: list) -> dict:
+    """
+    Walk a page's sections in document order and assign each an ordinal name
+    within its label, so duplicate section types are distinguishable by their
+    position on the page:
+
+        1st "catering"  -> "Catering 1"
+        2nd "catering"  -> "Catering 2"
+        1st "slideshow" -> "Slideshow 1"
+        ...
+
+    Returns {id(section): "Label N"}. The base label is _section_label(); the
+    ordinal counts occurrences of that same base label top to bottom. The name
+    is Title-cased for display. These names are used both in the 'sections' tab
+    and as the primary section-pairing key (old "Catering 1" pairs with new
+    "Catering 1").
+    """
+    counts = {}
+    names = {}
+    for sec in sections:
+        if sec is None:
+            continue
+        base = _section_label(sec) or "other"
+        counts[base] = counts.get(base, 0) + 1
+        names[id(sec)] = f"{base[:1].upper()}{base[1:]} {counts[base]}"
+    return names
+
+
+def _ordinal_key(name: str) -> str:
+    """Normalize an ordinal section name for matching (lowercase, single space)."""
+    return _normalize(name)
+
+
 def _section_label(section: dict) -> str:
     """
     A short, human-readable name for one section. Priority:
@@ -265,6 +298,10 @@ def build_section_pairs(old_data: dict, new_data: dict) -> list:
     old_sections = list(old_data.get("sections", []))
     new_sections = list(new_data.get("sections", []))
 
+    # Ordinal names ("Catering 1", "Catering 2", ...) per side, in doc order.
+    old_names = assign_section_ordinals(old_sections)
+    new_names = assign_section_ordinals(new_sections)
+
     out = []
     max_len = max(len(old_sections), len(new_sections))
     for i in range(max_len):
@@ -278,14 +315,32 @@ def build_section_pairs(old_data: dict, new_data: dict) -> list:
             "old_index":        i if old_sec is not None else None,
             "new_index":        i if new_sec is not None else None,
 
-            "old_section_name": _label_for(old_sec) if old_sec is not None else "MISSING",
+            "old_section_name": old_names.get(id(old_sec), "") if old_sec is not None else "MISSING",
             "old_html_type":    _html_type(old_sec) if old_sec is not None else "",
             "old_heading_text": _primary_heading(old_sec) if old_sec is not None else "",
-            "new_section_name": _label_for(new_sec) if new_sec is not None else "MISSING",
+            "new_section_name": new_names.get(id(new_sec), "") if new_sec is not None else "MISSING",
             "new_html_type":    _html_type(new_sec) if new_sec is not None else "",
             "new_heading_text": _primary_heading(new_sec) if new_sec is not None else "",
         })
     return out
+
+
+def _section_header_key(section: dict) -> str:
+    """
+    Normalized text of a section's HEADER heading — the single most prominent
+    heading, used as a strong identity signal when pairing sections across the
+    rebuild. Returns the first heading found scanning H1->H4 (after the rebuild
+    a section header is typically demoted H1->H2 but keeps its text), or "".
+
+    Distinct from _primary_heading, which joins ALL headings of a level; here
+    we want just the lead heading so "Specials" matches "Specials" even when
+    the new side added extra headings like "We are updating our specials".
+    """
+    for level in ("h1", "h2", "h3", "h4"):
+        for v in section.get(level, []):
+            if v and v.strip():
+                return _normalize(v)
+    return ""
 
 
 def _primary_heading(section: dict) -> str:
@@ -466,10 +521,22 @@ def build_validated_rows(old_data: dict, new_data: dict) -> list:
     old_sections = list(old_data.get("sections", []))
     new_sections = list(new_data.get("sections", []))
 
+    # Ordinal names ("Catering 1", "Catering 2", ...) per side, so the report's
+    # section-name column matches the 'sections' tab and distinguishes repeated
+    # section types.
+    old_names = assign_section_ordinals(old_sections)
+    new_names = assign_section_ordinals(new_sections)
+
     pairs = _pair_sections_global(old_sections, new_sections)
     rows = []
     for pair_idx, (old_sec, new_sec) in enumerate(pairs, start=1):
-        service = _pair_service_label(old_sec, new_sec)
+        # Prefer the old side's ordinal name; fall back to the new side's.
+        if old_sec is not None and id(old_sec) in old_names:
+            service = old_names[id(old_sec)]
+        elif new_sec is not None and id(new_sec) in new_names:
+            service = new_names[id(new_sec)]
+        else:
+            service = _pair_service_label(old_sec, new_sec)
         rows.extend(_compare_section_pair(service, pair_idx, old_sec, new_sec))
 
     # Reviews are compared once across the page (not per-section)
@@ -502,29 +569,62 @@ def _pair_service_label(old_sec, new_sec) -> str:
 
 def _pair_sections_global(old_list: list, new_list: list) -> list:
     """
-    Pair old and new sections across the WHOLE page by content similarity.
+    Pair old and new sections across the WHOLE page.
 
-    Greedy best-match: compute similarity for every (old, new) pair, then
-    repeatedly take the highest-scoring available pair above the threshold.
+    Two-pass strategy:
+      Pass 1 — ORDINAL NAME match. Each section is named by its type plus its
+        position among same-type sections in document order ("Catering 1",
+        "Catering 2", ...). Old "Catering 1" pairs with new "Catering 1", old
+        "Catering 2" with new "Catering 2", and so on. This reliably aligns
+        repeated section types (multiple locations, an Order section that
+        appears both standalone and inside a slideshow) that pure content
+        similarity would cross-pair.
+      Pass 2 — CONTENT SIMILARITY fallback for whatever's left. Sections with
+        no ordinal counterpart (a type that exists a different number of times
+        on each side, or only on one side) are matched greedily by Jaccard
+        similarity with the shared-header boost.
+
     Leftover sections on either side become unpaired (None on the other side).
-    Document order is preserved in the output as much as possible by sorting
-    final pairs on the old section's original index (then new index).
+    Document order is preserved as much as possible by sorting on the old
+    section's original index.
     """
-    old_sigs = [(i, sec, _section_signature(sec)) for i, sec in enumerate(old_list)]
-    new_sigs = [(j, sec, _section_signature(sec)) for j, sec in enumerate(new_list)]
-
-    # Score every candidate pair
-    candidates = []  # (score, old_idx, new_idx)
-    for i, o_sec, o_sig in old_sigs:
-        for j, n_sec, n_sig in new_sigs:
-            score = _similarity(o_sig, n_sig)
-            if score >= _PAIR_MATCH_THRESHOLD:
-                candidates.append((score, i, j))
-    candidates.sort(reverse=True)  # highest similarity first
+    old_names = assign_section_ordinals(old_list)
+    new_names = assign_section_ordinals(new_list)
 
     used_old = set()
     used_new = set()
     matched = []  # (old_idx, new_idx)
+
+    # --- Pass 1: ordinal-name match ("Catering 1" <-> "Catering 1") ---
+    new_by_name = {}
+    for j, sec in enumerate(new_list):
+        new_by_name.setdefault(_ordinal_key(new_names[id(sec)]), []).append(j)
+    for i, sec in enumerate(old_list):
+        key = _ordinal_key(old_names[id(sec)])
+        bucket = new_by_name.get(key)
+        if bucket:
+            j = bucket.pop(0)
+            used_old.add(i)
+            used_new.add(j)
+            matched.append((i, j))
+
+    # --- Pass 2: content-similarity fallback for the leftovers ---
+    old_sigs = [(i, sec, _section_signature(sec)) for i, sec in enumerate(old_list)
+                if i not in used_old]
+    new_sigs = [(j, sec, _section_signature(sec)) for j, sec in enumerate(new_list)
+                if j not in used_new]
+
+    candidates = []  # (score, old_idx, new_idx)
+    for i, o_sec, o_sig in old_sigs:
+        o_header = _section_header_key(o_sec)
+        for j, n_sec, n_sig in new_sigs:
+            score = _similarity(o_sig, n_sig)
+            n_header = _section_header_key(n_sec)
+            if o_header and n_header and o_header == n_header:
+                score = max(score, 0.95)
+            if score >= _PAIR_MATCH_THRESHOLD:
+                candidates.append((score, i, j))
+    candidates.sort(reverse=True)
     for score, i, j in candidates:
         if i in used_old or j in used_new:
             continue
@@ -533,15 +633,14 @@ def _pair_sections_global(old_list: list, new_list: list) -> list:
         matched.append((i, j))
 
     pairs = []
-    # Matched pairs
     for i, j in matched:
         pairs.append((i, j, old_list[i], new_list[j]))
     # Unmatched old → MISSING on new
-    for i, o_sec, _ in old_sigs:
+    for i, o_sec in enumerate(old_list):
         if i not in used_old:
             pairs.append((i, -1, o_sec, None))
     # Unmatched new → EXTRA on new
-    for j, n_sec, _ in new_sigs:
+    for j, n_sec in enumerate(new_list):
         if j not in used_new:
             pairs.append((10_000 + j, j, None, n_sec))
 
@@ -605,6 +704,45 @@ def _move_match_status(old_rank: int, new_rank: int) -> str:
     return "OK"
 
 
+def _token_set_ratio(a: str, b: str) -> float:
+    """
+    Jaccard overlap of the word-token sets of two strings (0..1). Robust to
+    word insertions/reorderings: "2955 jamacha road el cajon ca 92019" vs
+    "2955 jamacha road el cajon la mesa ca 92019" share most tokens, so the
+    ratio is high even though the strings aren't equal.
+    """
+    ta = set(_normalize(a).split())
+    tb = set(_normalize(b).split())
+    if not ta or not tb:
+        return 0.0
+    inter = len(ta & tb)
+    union = len(ta | tb)
+    return inter / union if union else 0.0
+
+
+def _common_prefix_ratio(a: str, b: str) -> float:
+    """
+    Length of the shared leading substring divided by the shorter string's
+    length (0..1). Two address headings that start identically
+    ("2955 Jamacha Road ...") score high here even if they diverge later.
+    """
+    na, nb = _normalize(a), _normalize(b)
+    if not na or not nb:
+        return 0.0
+    n = min(len(na), len(nb))
+    i = 0
+    while i < n and na[i] == nb[i]:
+        i += 1
+    return i / min(len(na), len(nb))
+
+
+# Thresholds for the fuzzy element-matching fallback. A pair is considered the
+# "same" element (text changed during the rebuild) when either the token-set
+# overlap or the common-prefix ratio clears its bar.
+_FUZZY_TOKEN_RATIO = 0.5
+_FUZZY_PREFIX_RATIO = 0.6
+
+
 def _compare_text_elements(service, pair_idx, old_sec, new_sec,
                            old_type, new_type) -> list:
     """
@@ -630,6 +768,8 @@ def _compare_text_elements(service, pair_idx, old_sec, new_sec,
     old_hidden_map = old_sec.get("heading_hidden", {}) or {}
     new_hidden_map = new_sec.get("heading_hidden", {}) or {}
 
+    # Pass 1: exact / plural-tolerant text match.
+    leftover_old = []
     for o_text, o_label, o_rank in old_items:
         o_hidden = old_hidden_map.get(o_text, "")
         matched_idx = None
@@ -650,6 +790,37 @@ def _compare_text_elements(service, pair_idx, old_sec, new_sec,
                              o_text, "", o_hidden, old_type,
                              n_text, "", n_hidden, new_type,
                              status))
+        else:
+            leftover_old.append((o_text, o_label, o_rank))
+
+    # Pass 2: fuzzy match on the leftovers. For each unmatched old element,
+    # score every unmatched new element by token-set ratio (primary) and
+    # common-prefix ratio (secondary); a candidate qualifies if either clears
+    # its threshold. Ties are broken by preferring the closest RANK (a demoted
+    # heading keeps a near rank), then the highest combined score. A fuzzy
+    # match means "same element, text edited during the rebuild" -> EXPECTED.
+    for o_text, o_label, o_rank in leftover_old:
+        o_hidden = old_hidden_map.get(o_text, "")
+        best = None  # (rank_distance, -score, idx)
+        for idx, (n_text, n_label, n_rank) in enumerate(new_remaining):
+            tr = _token_set_ratio(o_text, n_text)
+            pr = _common_prefix_ratio(o_text, n_text)
+            if tr >= _FUZZY_TOKEN_RATIO or pr >= _FUZZY_PREFIX_RATIO:
+                score = max(tr, pr)
+                rank_dist = abs(o_rank - n_rank)
+                cand = (rank_dist, -score, idx)
+                if best is None or cand < best:
+                    best = cand
+        if best is not None:
+            idx = best[2]
+            n_text, n_label, n_rank = new_remaining.pop(idx)
+            n_hidden = new_hidden_map.get(n_text, "")
+            # Fuzzy pair: the element is the same but its text was edited
+            # (e.g. an address that gained "La Mesa") -> EXPECTED.
+            rows.append(_row(service, pair_idx, o_label, n_label,
+                             o_text, "", o_hidden, old_type,
+                             n_text, "", n_hidden, new_type,
+                             "EXPECTED"))
         else:
             rows.append(_row(service, pair_idx, o_label, "",
                              o_text, "", o_hidden, old_type,
