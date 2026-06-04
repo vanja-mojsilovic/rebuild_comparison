@@ -71,6 +71,11 @@ SECTION_SELECTORS = [
     # Legacy SpotHopper bits
     "div.uk-overlay-panel",
     "div.tmt-section",
+    # Press-page cards: each press mention is its own <section class=
+    # "press-custom-card"> inside a .press-custom-grid. They aren't
+    # .section-wrapper blocks, so match them explicitly (each card → one
+    # section) for the custom-page press comparison.
+    "section.press-custom-card",
     # Universal SpotHopper wrapper — comes LAST so it catches any top-level
     # section we didn't identify by a more specific class. This ensures
     # every visible block on the page is captured in document order.
