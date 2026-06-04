@@ -22,7 +22,7 @@ from zoneinfo import ZoneInfo
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 
-from scraper import scrape_page
+from scraper import scrape_page, find_relevant_page_urls
 from comparator import (
     build_validated_rows,
     build_section_pairs,
@@ -30,6 +30,7 @@ from comparator import (
     summarize_h1,
 )
 from ai_classifier import classify_sections_pair
+from content_validator import validate_sections, validate_reviews
 
 
 # All report timestamps are written in Belgrade local time (Europe/Belgrade,
@@ -43,6 +44,8 @@ URLS_TAB = "urls"
 REPORT_TAB = "report"
 SECTIONS_TAB = "sections"
 SEO_TAB = "seo"
+CUSTOM_TAB = "custom"
+CONTENT_TAB = "content"
 
 
 # ----- Headers for each tab ----------------------------------------------
@@ -103,6 +106,39 @@ SEO_RANGE = f"{SEO_TAB}!A:H"
 SEO_HEADER_RANGE = f"{SEO_TAB}!A1:H1"
 
 
+# 'custom' tab — typo / strange-content + review-rule checks on the NEW site's
+# home-page sections and reviews.
+CUSTOM_HEADERS = [
+    "Restaurant name",
+    "Run timestamp",
+    "Source",          # "section" or "review"
+    "Section / Reviewer",
+    "Heading / Review text",
+    "Status",          # OK / POTENTIAL ISSUE
+    "Detail",
+]
+# Custom tab spans 7 columns → A:G
+CUSTOM_RANGE = f"{CUSTOM_TAB}!A:G"
+CUSTOM_HEADER_RANGE = f"{CUSTOM_TAB}!A1:G1"
+
+
+# 'content' tab — typo / a11y checks on the NEW site's OTHER relevant pages
+# (about / cater / parties / reserve / locations).
+CONTENT_HEADERS = [
+    "Restaurant name",
+    "Run timestamp",
+    "Page",            # about / cater / parties / reserve / locations
+    "Page URL",
+    "Section type",
+    "Heading",
+    "Status",          # OK / POTENTIAL ISSUE
+    "Detail",
+]
+# Content tab spans 8 columns → A:H
+CONTENT_RANGE = f"{CONTENT_TAB}!A:H"
+CONTENT_HEADER_RANGE = f"{CONTENT_TAB}!A1:H1"
+
+
 def get_sheets_service():
     raw = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
     if not raw:
@@ -154,13 +190,17 @@ def _ensure_headers(service, spreadsheet_id, header_range, write_anchor, headers
 
 
 def ensure_all_headers(service, spreadsheet_id):
-    """Ensure all three tabs have correct headers in row 1."""
+    """Ensure all result tabs have correct headers in row 1."""
     _ensure_headers(service, spreadsheet_id,
                     REPORT_HEADER_RANGE, f"{REPORT_TAB}!A1", REPORT_HEADERS)
     _ensure_headers(service, spreadsheet_id,
                     SECTIONS_HEADER_RANGE, f"{SECTIONS_TAB}!A1", SECTIONS_HEADERS)
     _ensure_headers(service, spreadsheet_id,
                     SEO_HEADER_RANGE, f"{SEO_TAB}!A1", SEO_HEADERS)
+    _ensure_headers(service, spreadsheet_id,
+                    CUSTOM_HEADER_RANGE, f"{CUSTOM_TAB}!A1", CUSTOM_HEADERS)
+    _ensure_headers(service, spreadsheet_id,
+                    CONTENT_HEADER_RANGE, f"{CONTENT_TAB}!A1", CONTENT_HEADERS)
 
 
 def clear_data_rows(service, spreadsheet_id):
@@ -173,7 +213,7 @@ def clear_data_rows(service, spreadsheet_id):
     tab-only reference as "all data in the tab" and clear leaves no choice
     of starting row, so we use an explicit "A2:" range per tab to skip row 1.
     """
-    for tab in (REPORT_TAB, SECTIONS_TAB, SEO_TAB):
+    for tab in (REPORT_TAB, SECTIONS_TAB, SEO_TAB, CUSTOM_TAB, CONTENT_TAB):
         service.spreadsheets().values().clear(
             spreadsheetId=spreadsheet_id,
             range=f"{tab}!A2:ZZ",
@@ -287,6 +327,61 @@ def build_seo_tab_rows(restaurant, timestamp, old_data, new_data):
 
 # ----- Append helpers ----------------------------------------------------
 
+def build_custom_tab_rows(restaurant, timestamp, section_results, review_results):
+    """
+    Rows for the 'custom' tab: typo/strange-content findings on the new site's
+    home sections, plus review-rule findings. section_results and
+    review_results are the lists returned by content_validator.
+    """
+    out = []
+    for r in section_results or []:
+        out.append([
+            restaurant,
+            timestamp,
+            "section",
+            r.get("service_type", ""),
+            (r.get("heading", "") or "")[:300],
+            r.get("status", ""),
+            r.get("issue", ""),
+        ])
+    for r in review_results or []:
+        out.append([
+            restaurant,
+            timestamp,
+            "review",
+            r.get("reviewer", ""),
+            (r.get("text", "") or "")[:300],
+            r.get("status", ""),
+            r.get("issue", ""),
+        ])
+    return out
+
+
+def build_content_tab_rows(restaurant, timestamp, page_results):
+    """
+    Rows for the 'content' tab: typo/a11y findings on the new site's other
+    relevant pages. page_results is a list of
+        {"page": kind, "url": url, "results": [section_result, ...]}
+    as assembled by the runner.
+    """
+    out = []
+    for page in page_results or []:
+        kind = page.get("page", "")
+        url = page.get("url", "")
+        for r in page.get("results", []):
+            out.append([
+                restaurant,
+                timestamp,
+                kind,
+                url,
+                r.get("service_type", ""),
+                (r.get("heading", "") or "")[:300],
+                r.get("status", ""),
+                r.get("issue", ""),
+            ])
+    return out
+
+
 def _append(service, spreadsheet_id, sheet_range, rows):
     if not rows:
         return
@@ -297,6 +392,14 @@ def _append(service, spreadsheet_id, sheet_range, rows):
         insertDataOption="INSERT_ROWS",
         body={"values": rows},
     ).execute()
+
+
+def append_to_custom(service, spreadsheet_id, rows):
+    _append(service, spreadsheet_id, CUSTOM_RANGE, rows)
+
+
+def append_to_content(service, spreadsheet_id, rows):
+    _append(service, spreadsheet_id, CONTENT_RANGE, rows)
 
 
 def append_to_report(service, spreadsheet_id, rows):
@@ -329,7 +432,7 @@ def main():
 
     print(f"Found {len(pairs)} URL pair(s) to process.", flush=True)
     ensure_all_headers(sheets, spreadsheet_id)
-    print("Clearing previous results from report/sections/seo tabs...", flush=True)
+    print("Clearing previous results from all tabs...", flush=True)
     clear_data_rows(sheets, spreadsheet_id)
 
     timestamp = datetime.now(REPORT_TZ).strftime("%Y-%m-%d %H:%M:%S %Z")
@@ -390,11 +493,52 @@ def main():
             )
             append_to_seo(sheets, spreadsheet_id, seo_rows)
 
+            # ---- custom tab (NEW site only): typo / strange-content checks on
+            #      home sections + review-rule checks. Skipped silently if the
+            #      OpenAI key/SDK is unavailable (returns []).
+            custom_section_results = validate_sections(
+                restaurant, new_data.get("sections", [])
+            )
+            custom_review_results = validate_reviews(
+                restaurant, new_data.get("reviews", [])
+            )
+            custom_rows = build_custom_tab_rows(
+                restaurant, timestamp, custom_section_results, custom_review_results
+            )
+            append_to_custom(sheets, spreadsheet_id, custom_rows)
+
+            # ---- content tab (NEW site only): validate the OTHER relevant
+            #      pages (about / cater / parties / reserve / locations) found
+            #      via the new site's nav links.
+            content_page_results = []
+            relevant = find_relevant_page_urls(new_data)
+            for kind, page_url in relevant.items():
+                try:
+                    page_data = scrape_page(page_url)
+                except Exception as pe:
+                    print(f"    content: failed to scrape {kind} ({page_url}): {pe}",
+                          flush=True)
+                    continue
+                page_section_results = validate_sections(
+                    restaurant, page_data.get("sections", [])
+                )
+                if page_section_results:
+                    content_page_results.append({
+                        "page": kind,
+                        "url": page_url,
+                        "results": page_section_results,
+                    })
+            content_rows = build_content_tab_rows(
+                restaurant, timestamp, content_page_results
+            )
+            append_to_content(sheets, spreadsheet_id, content_rows)
+
             ok = sum(1 for r in comparison_rows if r.get("match") == "OK")
             issues = len(comparison_rows) - ok
             ai_mark = "✓" if ai_labels else "✗"
             print(f"  ✓ report: {len(report_rows)} rows (OK: {ok}, issues: {issues})  "
-                  f"sections: {len(sections_rows)} (ai {ai_mark})  seo: {len(seo_rows)}",
+                  f"sections: {len(sections_rows)} (ai {ai_mark})  seo: {len(seo_rows)}  "
+                  f"custom: {len(custom_rows)}  content: {len(content_rows)}",
                   flush=True)
         except Exception as e:
             failures += 1

@@ -1,0 +1,428 @@
+"""
+Content validation via OpenAI — typo / strange-content checks for sections,
+and rule-based checks for reviews.
+
+Two consumers:
+  * the 'custom' tab — validates the NEW site's home-page sections + reviews
+    (the same scraped data the comparison uses).
+  * the 'content' tab — validates sections scraped from the NEW site's other
+    relevant pages (/about, /cater, /parties, /reserve, /locations).
+
+Both call the same engine here; only the input sections differ.
+
+Conventions match ai_classifier.py:
+  * OPENAI_MODEL is the single knob (gpt-5.5).
+  * Reasoning models (gpt-5.x / o-series) need reasoning_effort='low' and a
+    generous token budget, or the JSON answer comes back empty.
+  * The API key is read from OPENAI_API_KEY, then OPEN_AI_KEY.
+  * Everything is defensive: missing key, SDK, or unparseable JSON → empty
+    results and the workflow keeps going.
+"""
+
+import json
+import os
+import sys
+import time
+from typing import Optional
+
+
+# Single knob — change here to upgrade everywhere.
+OPENAI_MODEL = "gpt-5.5"
+
+
+def _token_limit_kwarg(n: int) -> dict:
+    """Return the correct token-limit kwarg for the active model."""
+    legacy = OPENAI_MODEL.startswith(("gpt-3", "gpt-4o", "gpt-4.1", "gpt-4-"))
+    return {"max_tokens": n} if legacy else {"max_completion_tokens": n}
+
+
+def _gpt5_extra_kwargs() -> dict:
+    """reasoning_effort='low' for reasoning models; empty for legacy chat models."""
+    if OPENAI_MODEL.startswith(("gpt-5", "o1", "o3", "o4")):
+        return {"reasoning_effort": "low"}
+    return {}
+
+
+def _strip_fences(text: str) -> str:
+    """Strip markdown code fences from model output."""
+    return (
+        (text or "").strip()
+        .removeprefix("```json")
+        .removeprefix("```")
+        .removesuffix("```")
+        .strip()
+    )
+
+
+def _get_api_key() -> Optional[str]:
+    return os.environ.get("OPENAI_API_KEY") or os.environ.get("OPEN_AI_KEY")
+
+
+def _get_client():
+    """Lazily build the OpenAI client. None means 'skip the AI step'."""
+    key = _get_api_key()
+    if not key:
+        return None
+    try:
+        from openai import OpenAI
+    except ImportError:
+        print("[content_validator] openai SDK not installed; skipping validation.",
+              file=sys.stderr)
+        return None
+    return OpenAI(api_key=key)
+
+
+def _call_openai(client, prompt: str, budget: int = 16000) -> str:
+    """Make one chat completion call; return raw content ('' on any failure)."""
+    try:
+        time.sleep(0.5)
+        response = client.chat.completions.create(
+            model=OPENAI_MODEL,
+            messages=[{"role": "user", "content": prompt}],
+            **_token_limit_kwarg(budget),
+            **_gpt5_extra_kwargs(),
+        )
+    except Exception as e:
+        print(f"[content_validator] OpenAI call failed: {e}", file=sys.stderr)
+        return ""
+    try:
+        choice = response.choices[0]
+        finish_reason = getattr(choice, "finish_reason", None)
+        raw = choice.message.content or ""
+        if not raw.strip():
+            print(f"[content_validator] empty response (finish_reason={finish_reason!r})",
+                  file=sys.stderr)
+        return raw
+    except Exception as e:
+        print(f"[content_validator] could not read response: {e}", file=sys.stderr)
+        return ""
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Shared suppression rules (kept verbatim from the reference project so the
+# model's behavior matches what the team already tuned).
+# ──────────────────────────────────────────────────────────────────────────
+
+_ENTITY_SUPPRESSION_RULE = (
+    "- DO NOT flag HTML entities such as &apos; &quot; &amp; &#39; &#34; "
+    "or similar encoded apostrophes, quotes, or ampersands. These are "
+    "normal and expected — treat them as if they render correctly "
+    "(e.g. treat \"I&apos;m\" as \"I'm\" and \"Smith &amp; Co\" as "
+    "\"Smith & Co\"). Do NOT mention them in any explanation, not even "
+    "as a borderline note. The ONLY encoding issue to flag is the U+FFFD "
+    "replacement character (\ufffd)."
+)
+
+_SOCIAL_LABEL_SUPPRESSION_RULE = (
+    "- DO NOT flag social media link labels that combine platform names, "
+    "such as \"Twitter/ X page\", \"Twitter / X\", \"X (Twitter)\", or "
+    "\"X (formerly Twitter) page\". These read acceptably to a screen "
+    "reader — treat them as CORRECT and do NOT suggest rewordings."
+)
+
+_REVIEWER_NAME_RULE = (
+    "- The REVIEWER'S OWN DISPLAYED NAME (the \"reviewer\" field in the data) "
+    "must have the last name abbreviated to a single initial. The accepted "
+    "format is a first name followed by a last-name initial, e.g. \"Sarah M.\" "
+    "or \"John D.\". Flag a POTENTIAL ISSUE if the reviewer field contains a "
+    "FULL last name (e.g. \"Sarah Miller\" should be \"Sarah M.\", "
+    "\"John Davis\" should be \"John D.\"). A bare first name with no last name "
+    "at all (e.g. \"Sarah\") is acceptable — do NOT flag that."
+)
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Prompts (JSON-output API variants of the reference prompts)
+# ──────────────────────────────────────────────────────────────────────────
+
+def _build_reviews_prompt(restaurant_name: str, reviews_json: str) -> str:
+    return f"""Check each review of the restaurant "{restaurant_name}" according to these rules:
+
+Rules:
+- The review must not have a specific price/pricetag (e.g., $20)
+- It must not mention any other business BY NAME. Generic references like
+  "the other locations" or "another spot" are FINE. Only flag NAMED competitors.
+- It must not have the first name, last name, or nickname of a worker/any person
+  (this rule is about people mentioned INSIDE the review text)
+{_REVIEWER_NAME_RULE}
+- No negative connotation; the review should be positive
+- No swearing or obscene words
+- Must not say that it is expensive
+- Must not have U+FFFD character
+- If the reviewer names are Tina, Carlos or Cris, or the text contains a sample
+  like 'This is n-th example', flag it as a potential issue
+
+DO NOT FLAG (these are normal and expected):
+{_ENTITY_SUPPRESSION_RULE}
+
+Analyze each review individually. Even when a review passes all rules, provide
+a short explanation of WHY it passes and note anything borderline worth a
+human's attention.
+
+Reviews data:
+{reviews_json}
+
+Respond ONLY with a JSON array (no markdown fences) where each element has:
+- id: the review id (matching the input)
+- issue: "OK: <short explanation and any borderline notes>" or
+         "POTENTIAL ISSUE: <which rule, the triggering text, and nuance>"
+
+Example: [{{"id": "r0", "issue": "OK: positive tone, reviewer name 'Sarah M.' correctly abbreviated, no flagged content."}}, {{"id": "r1", "issue": "POTENTIAL ISSUE: reviewer name 'John Davis' shows a full last name — should be 'John D.'"}}]"""
+
+
+def _build_sections_prompt(restaurant_name: str, sections_json: str) -> str:
+    return f"""You are reviewing the website of the restaurant "{restaurant_name}".
+For each section you have TWO responsibilities of EQUAL weight:
+
+  (A) SPELLING & GRAMMAR — every word in `heading` and `body_text` must be
+      a correctly-spelled, correctly-used English word.
+  (B) ACCESSIBILITY — interactive elements (buttons and links) must read
+      sensibly to a screen reader.
+
+═══════════════════════════════════════════════════════════════════════════
+(A) SPELLING & GRAMMAR — RUN THIS CHECK FIRST, ON EVERY SECTION
+═══════════════════════════════════════════════════════════════════════════
+
+Procedure: read the `heading` field word-by-word, then the `body_text` field
+word-by-word. Treat each word as suspect until you confirm it is a real
+English word used correctly. CAPITALIZED words in headings are NOT exempt —
+restaurants do not intentionally misspell common English words in titles
+like "Tialored Catering Options" or "Welcom to Our Menu".
+
+Flag a POTENTIAL ISSUE if you find any of these typo patterns:
+
+1. LETTER TRANSPOSITION (two adjacent letters swapped):
+     "Tialored" → "Tailored"; "freind" → "friend"; "recieve" → "receive";
+     "thier" → "their"; "wich" → "which"
+2. MISSING / EXTRA LETTERS:
+     "untill" → "until"; "definately" → "definitely"; "occured" → "occurred";
+     "seperate" → "separate"; "accomodate" → "accommodate"; "tomorow" → "tomorrow"
+3. WRONG WORD / HOMOPHONE (a real word, but the wrong one):
+     "bellow" → "below"; "their/there/they're"; "your/you're"; "its/it's";
+     "to/too/two"; "then/than"; "lose/loose"
+4. DOUBLED WORDS: "the the", "is is", "and and", "we we"
+5. MISSING SPACES: "clickhere", "menubelow", verb "signup" (should be "sign up")
+6. U+FFFD replacement character (\ufffd) anywhere in the text.
+
+When you find a typo, quote the exact word as it appears and state the correction.
+
+Also flag misspelled BRAND names: DoorDash, Uber Eats, Grubhub, Postmates,
+Toast, ChowNow, Seamless, Caviar, OpenTable, Resy, Yelp, Facebook, Instagram.
+
+Restaurant name mismatch (flag only if clearly wrong, not minor variations).
+
+═══════════════════════════════════════════════════════════════════════════
+(B) ACCESSIBILITY — INTERACTIVE ELEMENTS
+═══════════════════════════════════════════════════════════════════════════
+
+KEY CONCEPT — VISIBLE + HIDDEN TEXT:
+A button/link can have visible text AND visually-hidden (sr-only) text.
+The `screen_reader_reads` field already reflects DOM order — treat it as
+the actual screen reader output. Do NOT infer order from `visible`/`hidden`.
+
+Each interactive element falls into one of:
+1. CORRECT — `screen_reader_reads` is a clear, sensible action label.
+2. INSUFFICIENT — visible text is a content-free phrase ("Click Here",
+   "Learn More", "Submit", "Go", bare arrow) AND no hidden text clarifies it.
+   Do NOT flag labels that name a real action: "Reserve Now", "Book Now",
+   "Order Online", "Catering", "Apply Now", "Get Directions", etc.
+   EXCEPTION: skip this check for service_type "map", "newsletter", "contact".
+3. REDUNDANT — hidden text repeats words already in the visible text.
+   EXCEPTION: skip for "contact" or "newsletter".
+
+Also flag unnatural combined readings (wrong preposition, etc.).
+
+═══════════════════════════════════════════════════════════════════════════
+DO NOT FLAG
+═══════════════════════════════════════════════════════════════════════════
+- Missing headings
+- Hidden text adding new concepts
+- Repeated CTAs across a section
+- Minor restaurant name variations
+- Apostrophes, ampersands, trailing dots
+- <br> used as a word separator
+- Stylistic choices (Title Case, ALL CAPS) when the words themselves are spelled correctly
+{_ENTITY_SUPPRESSION_RULE}
+{_SOCIAL_LABEL_SUPPRESSION_RULE}
+
+═══════════════════════════════════════════════════════════════════════════
+OUTPUT
+═══════════════════════════════════════════════════════════════════════════
+
+Sections data:
+{sections_json}
+
+Respond ONLY with a JSON array (no markdown fences) where each element has:
+- id: the section id (matching the input)
+- issue: "OK: <short explanation; note anything borderline>" or
+         "POTENTIAL ISSUE: <category, field, exact quoted text, correction or nuance>"
+
+If a section has MULTIPLE problems, list all of them in the same `issue`
+string, separated by " | ".
+
+Examples:
+[
+  {{"id": "s0", "issue": "OK: heading and body text spelled correctly; button reads naturally."}},
+  {{"id": "s1", "issue": "POTENTIAL ISSUE: TYPO in heading — 'Tialored' should be 'Tailored'."}},
+  {{"id": "s2", "issue": "POTENTIAL ISSUE: TYPO in body_text — 'bellow' should be 'below' in 'clicking the button bellow'."}}
+]"""
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Mapping: my scraper's section dict → the prompt's expected shape
+# ──────────────────────────────────────────────────────────────────────────
+
+def _section_to_payload(section: dict, vid: str) -> dict:
+    """
+    Convert one scraper section into the {id, service_type, heading, body_text,
+    interactive[]} shape the sections prompt expects.
+
+    heading   = all h1–h4 joined with " | "
+    body_text = all paragraphs + list items joined with " | "
+    interactive = buttons mapped to {visible, hidden, screen_reader_reads},
+                  where screen_reader_reads is visible+hidden in DOM order
+                  (my scraper stores them separately; hidden follows visible).
+    """
+    heading_parts = []
+    for h in ("h1", "h2", "h3", "h4"):
+        heading_parts.extend(section.get(h, []) or [])
+    heading_text = " | ".join(p for p in heading_parts if p)
+
+    body_parts = list(section.get("paragraphs", []) or [])
+    body_parts.extend(section.get("list_items", []) or [])
+    body_text = " | ".join(p for p in body_parts if p)
+
+    interactive = []
+    for b in section.get("buttons", []) or []:
+        visible = (b.get("visible_text") or b.get("text") or "").strip()
+        hidden = (b.get("hidden_text") or "").strip()
+        if not (visible or hidden):
+            continue
+        sr = (visible + " " + hidden).strip()
+        interactive.append({
+            "visible": visible,
+            "hidden": hidden,
+            "screen_reader_reads": sr,
+        })
+
+    return {
+        "id": vid,
+        "service_type": section.get("ai_service") or "other",
+        "heading": heading_text,
+        "body_text": body_text,
+        "interactive": interactive,
+    }
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# Public entry points
+# ──────────────────────────────────────────────────────────────────────────
+
+def validate_sections(restaurant: str, sections: list) -> list:
+    """
+    Validate a list of scraper sections for typos / strange content / a11y.
+
+    Returns a list of result dicts:
+        {section_index, service_type, heading, status, issue}
+    where status is "OK" or "POTENTIAL ISSUE". Returns [] if the AI step is
+    skipped (no key / no SDK / no usable sections).
+    """
+    client = _get_client()
+    if client is None or not sections:
+        return []
+
+    payloads = []
+    tracked = []  # (vid, original_index, section)
+    for idx, section in enumerate(sections):
+        if section is None:
+            continue
+        # Skip structural/no-content types
+        if (section.get("ai_service") or "") in ("footer", "header", "other"):
+            continue
+        vid = f"s{idx}"
+        payload = _section_to_payload(section, vid)
+        if payload["heading"] or payload["body_text"] or payload["interactive"]:
+            payloads.append(payload)
+            tracked.append((vid, idx, section))
+
+    if not payloads:
+        return []
+
+    prompt = _build_sections_prompt(restaurant, json.dumps(payloads, indent=2))
+    raw = _call_openai(client, prompt)
+    try:
+        results = json.loads(_strip_fences(raw))
+    except json.JSONDecodeError:
+        print("[content_validator] could not parse section validation JSON.", file=sys.stderr)
+        results = []
+
+    result_map = {r.get("id"): r.get("issue", "OK: no detailed response")
+                  for r in results if isinstance(r, dict)}
+
+    out = []
+    for vid, idx, section in tracked:
+        issue = result_map.get(vid, "OK: no detailed response")
+        status = "POTENTIAL ISSUE" if "POTENTIAL ISSUE" in issue else "OK"
+        payload = _section_to_payload(section, vid)
+        out.append({
+            "section_index": idx,
+            "service_type": payload["service_type"],
+            "heading": payload["heading"],
+            "status": status,
+            "issue": issue,
+        })
+    return out
+
+
+def validate_reviews(restaurant: str, reviews: list) -> list:
+    """
+    Validate a list of reviews (each {text, reviewer}) against the review rules.
+
+    Returns a list of result dicts:
+        {review_index, reviewer, text, status, issue}
+    Returns [] if the AI step is skipped or there are no reviews with text.
+    """
+    client = _get_client()
+    if client is None or not reviews:
+        return []
+
+    payloads = []
+    tracked = []  # (vid, original_index, review)
+    for idx, rv in enumerate(reviews):
+        text = (rv.get("text") or "").strip()
+        if not text:
+            continue
+        vid = f"r{idx}"
+        payloads.append({
+            "id": vid,
+            "reviewer": (rv.get("reviewer") or "Unknown").strip() or "Unknown",
+            "text": text,
+        })
+        tracked.append((vid, idx, rv))
+
+    if not payloads:
+        return []
+
+    prompt = _build_reviews_prompt(restaurant, json.dumps(payloads, indent=2))
+    raw = _call_openai(client, prompt, budget=8000)
+    try:
+        results = json.loads(_strip_fences(raw))
+    except json.JSONDecodeError:
+        print("[content_validator] could not parse review validation JSON.", file=sys.stderr)
+        results = []
+
+    result_map = {r.get("id"): r.get("issue", "OK: no detailed response")
+                  for r in results if isinstance(r, dict)}
+
+    out = []
+    for vid, idx, rv in tracked:
+        issue = result_map.get(vid, "OK: no detailed response")
+        status = "POTENTIAL ISSUE" if "POTENTIAL ISSUE" in issue else "OK"
+        out.append({
+            "review_index": idx,
+            "reviewer": (rv.get("reviewer") or "Unknown"),
+            "text": (rv.get("text") or ""),
+            "status": status,
+            "issue": issue,
+        })
+    return out
