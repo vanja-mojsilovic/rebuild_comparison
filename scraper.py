@@ -574,6 +574,24 @@ def _section_data(el: Tag) -> dict:
             cursor = cursor.parent
         return False
 
+    def _is_review_source_heading(node: Tag) -> bool:
+        """
+        True if `node` is the per-slide review SOURCE heading — the
+        "Review by - Google" / "review by - Yelp" line (class "review-by" on
+        the new template, a bare <h2> on the old one).
+
+        This is kept (deduplicated to one row, since it's identical on every
+        slide) while reviewer names and quote paragraphs remain skipped, so
+        the report shows which platform the reviews come from.
+        """
+        if not _is_review_carousel:
+            return False
+        cls = node.get("class") or []
+        if "review-by" in cls:
+            return True
+        txt = _clean_text(node.get_text(separator=" ")).lower()
+        return txt.startswith("review by") or txt.startswith("reviews by")
+
     # --- 1. Find all clickables and mark their text as off-limits ---
     clickable_selector = 'a, button, [role="button"], [role="link"]'
     # Skip clickables that sit inside a hidden wrapper (aria-hidden="true",
@@ -632,10 +650,11 @@ def _section_data(el: Tag) -> dict:
                 continue
             if _is_hidden_anywhere(t):
                 continue
-            # In a reviews carousel, skip per-slide content (review-by heading,
-            # reviewer name, quote paragraph) — those are reported as REVIEW
-            # rows instead. Keep only the section header.
-            if _in_review_slide(t):
+            # In a reviews carousel, skip per-slide content (reviewer name,
+            # quote paragraph) — those are reported as REVIEW rows instead.
+            # Keep the section header AND the review SOURCE heading
+            # ("Review by - Google"), which is deduped to a single row below.
+            if _in_review_slide(t) and not _is_review_source_heading(t):
                 continue
             text_value = _text_excluding_clickables(t)
             if not text_value:
