@@ -530,13 +530,16 @@ def build_validated_rows(old_data: dict, new_data: dict) -> list:
     pairs = _pair_sections_global(old_sections, new_sections)
     rows = []
     for pair_idx, (old_sec, new_sec) in enumerate(pairs, start=1):
-        # Prefer the old side's ordinal name; fall back to the new side's.
-        if old_sec is not None and id(old_sec) in old_names:
-            service = old_names[id(old_sec)]
-        elif new_sec is not None and id(new_sec) in new_names:
-            service = new_names[id(new_sec)]
-        else:
-            service = _pair_service_label(old_sec, new_sec)
+        # Each side carries its OWN ordinal AI label, so the report can show
+        # "Old site section name" and "New site section name" separately — they
+        # can differ when the AI labeled the two sides differently.
+        old_name = old_names.get(id(old_sec), "") if old_sec is not None else ""
+        new_name = new_names.get(id(new_sec), "") if new_sec is not None else ""
+        # Fall back to the resolved pair label if a side has no ordinal name.
+        if not old_name and not new_name:
+            fallback = _pair_service_label(old_sec, new_sec)
+            old_name = new_name = fallback
+        service = (old_name, new_name)
         rows.extend(_compare_section_pair(service, pair_idx, old_sec, new_sec))
 
     # Reviews are compared once across the page (not per-section)
@@ -1536,9 +1539,23 @@ def _row(service, pair_idx, old_element, new_element,
          old_text, old_href, old_hidden, old_html_type,
          new_text, new_href, new_hidden, new_html_type,
          match) -> dict:
-    """Construct a single comparison row in the canonical shape."""
+    """Construct a single comparison row in the canonical shape.
+
+    `service` may be either a single string (used for both sides) or a
+    (old_section_name, new_section_name) tuple when the two sides carry
+    different ordinal AI labels. The row exposes both names separately as
+    `old_section_name` / `new_section_name`, and keeps `service` as the old
+    name for backward compatibility.
+    """
+    if isinstance(service, (tuple, list)):
+        old_name = service[0] if len(service) > 0 else ""
+        new_name = service[1] if len(service) > 1 else ""
+    else:
+        old_name = new_name = service
     return {
-        "service": service,
+        "service": old_name,
+        "old_section_name": old_name,
+        "new_section_name": new_name,
         "section_pair": pair_idx,
         "old_element": old_element,
         "new_element": new_element,
