@@ -1489,11 +1489,15 @@ def _compare_buttons(service, pair_idx, old_btns, new_btns,
     return rows
 
 
-def _compare_reviews(old_reviews, new_reviews) -> list:
+def _compare_reviews(old_reviews, new_reviews, service="Reviews 1") -> list:
     """
     Compare reviews across the two sites. Each review is its own row.
     In a rebuild the same set of reviews should appear on both sides.
     Reviews are rendered as a carousel on both old and new sites.
+
+    `service` is the section name written to the row's section-name columns;
+    it defaults to "Reviews 1" so the REVIEW rows match the ordinal name used
+    by the reviews section's header/control rows instead of a bare "reviews".
     """
     rows = []
     new_keys = {_review_key(r): r for r in new_reviews}
@@ -1507,19 +1511,19 @@ def _compare_reviews(old_reviews, new_reviews) -> list:
         n = new_keys.get(k)
         if n is not None:
             seen_new.add(k)
-            rows.append(_row("reviews", 1, "REVIEW", "REVIEW",
+            rows.append(_row(service, 1, "REVIEW", "REVIEW",
                              o.get("text", ""), "", o.get("reviewer", ""), review_type,
                              n.get("text", ""), "", n.get("reviewer", ""), review_type,
                              "OK"))
         else:
-            rows.append(_row("reviews", 1, "REVIEW", "",
+            rows.append(_row(service, 1, "REVIEW", "",
                              o.get("text", ""), "", o.get("reviewer", ""), review_type,
                              "", "", "", review_type,
                              "MISSING on new"))
 
     for n in new_reviews:
         if _review_key(n) not in seen_new:
-            rows.append(_row("reviews", 1, "", "REVIEW",
+            rows.append(_row(service, 1, "", "REVIEW",
                              "", "", "", review_type,
                              n.get("text", ""), "", n.get("reviewer", ""), review_type,
                              "EXTRA on new"))

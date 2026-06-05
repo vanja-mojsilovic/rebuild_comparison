@@ -823,14 +823,29 @@ def extract_reviews(soup: BeautifulSoup) -> list:
         p = bq.find("p")
         text = (p.get_text() if p else bq.get_text()) or ""
         reviewer = ""
-        parent = bq.parent
-        if parent:
-            heading = parent.find(["h3", "h4"]) or parent.find(
+        # The reviewer name lives in an <h4 class="reviewer"> (or h3) that is
+        # usually a SIBLING of the .review-text wrapper, not a descendant of
+        # the blockquote's immediate parent. Walk up to the review "item"
+        # container and search there so the name is found regardless of which
+        # sibling holds it.
+        container = bq.parent
+        for _ in range(3):  # blockquote → review-text → item (a few hops max)
+            if container is None:
+                break
+            cls = container.get("class") or []
+            if any(c in ("item", "review", "review-item", "testimonial") for c in cls):
+                break
+            container = container.parent
+        search_root = container if container is not None else bq.parent
+        heading = None
+        if search_root is not None:
+            heading = search_root.find(
                 class_=lambda c: c and ("reviewer" in c or "review-author" in c)
-            )
-            if heading:
-                reviewer = re.sub(r"^.*?by\s*", "", heading.get_text(), flags=re.I)
-                reviewer = re.sub(r"[:|-].*$", "", reviewer).strip()
+            ) or search_root.find(["h3", "h4"])
+        if heading:
+            reviewer = re.sub(r"^.*?\bby\s*", "", heading.get_text(), flags=re.I)
+            reviewer = re.sub(r"[:|].*$", "", reviewer)
+            reviewer = re.sub(r"\s*-\s*.*$", "", reviewer).strip()
         push(text, reviewer)
 
     # 2. schema.org Review microdata
