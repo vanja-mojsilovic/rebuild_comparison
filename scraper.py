@@ -61,6 +61,14 @@ SECTION_SELECTORS = [
     "div.openstreetmap-v3-wrapper",
     "div.maps-wrapper",
     "div.contact-v4",
+    # Slideshow wrapper — must come BEFORE div.uk-overlay-panel, because the
+    # overlay-panel lives inside each slide. If the panel matched first, only
+    # the single ACTIVE slide's panel would be captured (the rest are
+    # aria-hidden and get filtered), losing the other slides. Matching the
+    # wrapper lets _explode_multi_section_wrapper split it into one section
+    # per slide.
+    "div.slideshow-v2-wrapper",
+    "div.slideshow-wrapper",
     # custom_html_1-section is a generic "custom HTML block" wrapper —
     # classify by its actual content (video / button / text) rather than
     # by the selector name.
@@ -445,27 +453,60 @@ def extract_sections(soup: BeautifulSoup) -> list:
 
 def _explode_multi_section_wrapper(el: Tag, matched_sel: str) -> list:
     """
-    If `el` is a SpotHopper about-us-v8 wrapper containing multiple sibling
-    <section> children laying out distinct visual blocks, return those child
-    sections as a list (so each one becomes a separate section row).
+    Split a wrapper that lays out multiple distinct visual blocks into one
+    child section per block, so each becomes its own section row.
 
-    Returns [] when:
-      - the wrapper is not about-us-v8-wrapper, or
-      - the wrapper only contains zero or one child section (no need to explode)
+    Handles two SpotHopper layouts:
+
+      1. about-us-v8-wrapper > div.container.about-us-v8 > section, section, …
+         Each child <section> is a distinct block (about us / parties / …).
+
+      2. A SLIDESHOW (uk-slideshow / slideshow-v2-wrapper / data-uk-slideshow)
+         whose <ul class="uk-slideshow"> holds multiple <li> slides, each with
+         its own heading and CTA (Drinks / Food menu / Brunch / …). Each slide
+         is real rotating content, so we emit one section per slide. The slides
+         carry aria-hidden="true" on all but the active one; we REMOVE that
+         attribute on the exploded copies so every slide's heading/button is
+         collected (otherwise only the one visible slide survives the
+         visibility filter, and which slide that is can differ old vs new,
+         scrambling the positional pairing).
+
+    Returns [] when there's nothing to explode (wrong wrapper, or 0–1 blocks).
     """
-    if "about-us-v8-wrapper" not in matched_sel:
-        return []
+    # --- Layout 1: about-us-v8 sibling sections ---
+    if "about-us-v8-wrapper" in matched_sel:
+        container = el.find("div", class_="about-us-v8")
+        if container is None:
+            return []
+        children = container.find_all("section", recursive=False)
+        if len(children) <= 1:
+            return []
+        return children
 
-    # The template structure is:
-    #   div.about-us-v8-wrapper > div.container.about-us-v8 > section, section, ...
-    container = el.find("div", class_="about-us-v8")
-    if container is None:
-        return []
-    children = container.find_all("section", recursive=False)
-    if len(children) <= 1:
-        # One or none — nothing to explode; let the wrapper become the section.
-        return []
-    return children
+    # --- Layout 2: slideshow with multiple <li> slides ---
+    if _matches_any(el, _SLIDESHOW_SELECTORS) or "slideshow" in matched_sel:
+        slide_list = el.find("ul", class_="uk-slideshow")
+        if slide_list is None:
+            return []
+        slides = slide_list.find_all("li", recursive=False)
+        # Only explode when there's genuinely more than one slide carrying
+        # heading/text content (a single-slide "slideshow" is just a hero).
+        content_slides = [
+            li for li in slides
+            if li.find(["h1", "h2", "h3", "h4"]) or li.find("a")
+        ]
+        if len(content_slides) <= 1:
+            return []
+        # Neutralize aria-hidden / hidden markers on each slide so the section
+        # extractor collects every slide's content, not just the active one.
+        for li in content_slides:
+            if li.has_attr("aria-hidden"):
+                del li["aria-hidden"]
+            if li.has_attr("hidden"):
+                del li["hidden"]
+        return content_slides
+
+    return []
 
 
 # Maps from a SpotHopper section selector to a friendly section name.
