@@ -352,6 +352,10 @@ _MEDIA_CONTROL_PHRASES = (
     # Map controls
     "zoom in", "zoom out", "reset zoom", "zoom map",
     "rotate the view", "rotate clockwise", "rotate counterclockwise",
+    "map marker", "marker pin", "map pin", "marker icon",
+    "view larger map", "open this area", "toggle fullscreen", "enter fullscreen",
+    "exit fullscreen", "keyboard shortcuts", "map data", "terms of use",
+    "report a problem", "report a map error",
 )
 
 # Bare glyphs used as widget controls with no descriptive text. When a control
