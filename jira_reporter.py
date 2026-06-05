@@ -38,13 +38,21 @@ _OK_STATUSES = ("OK", "EXPECTED")
 
 
 def _seo_line(new_data: dict) -> tuple:
-    """SEO: OK when the NEW site has exactly one H1. Returns (status, details)."""
-    h1s = [h for h in (new_data.get("page_h1s") or []) if (h or "").strip()]
-    n = len(h1s)
+    """
+    SEO: OK when the NEW site has exactly one H1 with text content.
+
+    page_h1s is a list of {"text", "visible", "empty"} dicts (from the scraper),
+    so we count the entries that actually carry text. Returns (status, details).
+    """
+    h1s = new_data.get("page_h1s") or []
+    with_text = [h for h in h1s
+                 if isinstance(h, dict) and not h.get("empty")
+                 and (h.get("text") or "").strip()]
+    n = len(with_text)
     if n == 1:
         return "OK", []
     if n == 0:
-        return "ISSUE", ["no H1 element on the new site"]
+        return "ISSUE", ["no H1 element with text on the new site"]
     return "ISSUE", [f"{n} H1 elements on the new site (expected exactly 1)"]
 
 
