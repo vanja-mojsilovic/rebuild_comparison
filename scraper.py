@@ -807,16 +807,18 @@ def extract_reviews(soup: BeautifulSoup) -> list:
     out = []
     seen = set()
 
-    def push(text, reviewer):
+    def push(text, reviewer, reviewer_hidden=""):
         text = _clean_text(text or "")
         reviewer = _clean_text(reviewer or "")
+        reviewer_hidden = _clean_text(reviewer_hidden or "")
         if not text or len(text) < 10:
             return
         key = text.lower()
         if key in seen:
             return
         seen.add(key)
-        out.append({"text": text, "reviewer": reviewer})
+        out.append({"text": text, "reviewer": reviewer,
+                    "reviewer_hidden": reviewer_hidden})
 
     # 1. blockquote layout (SpotHopper default)
     for bq in soup.find_all("blockquote"):
@@ -842,14 +844,31 @@ def extract_reviews(soup: BeautifulSoup) -> list:
             heading = search_root.find(
                 class_=lambda c: c and ("reviewer" in c or "review-author" in c)
             ) or search_root.find(["h3", "h4"])
+        reviewer_hidden = ""
         if heading:
-            # Collapse whitespace/newlines first so the strip regexes below
-            # behave predictably (the raw heading text spans multiple lines).
+            # Capture the heading's visually-hidden text (e.g. the sr-only
+            # "five star review by" prefix) SEPARATELY so it can populate the
+            # hidden column, while the visible reviewer name goes to the text
+            # column. Collect text from any sr-only descendant span.
+            hidden_bits = []
+            for sub in heading.find_all(True):
+                sub_cls = sub.get("class") or []
+                if any(c in HIDDEN_CLASSES for c in sub_cls):
+                    bit = _clean_text(sub.get_text())
+                    if bit:
+                        hidden_bits.append(bit)
+            reviewer_hidden = " ".join(hidden_bits)
+
+            # Visible reviewer name = the heading text MINUS the hidden bits,
+            # then stripped of the "review by" lead-in and trailing colon/stars.
             raw_name = _clean_text(heading.get_text())
+            for bit in hidden_bits:
+                raw_name = raw_name.replace(bit, " ")
+            raw_name = _clean_text(raw_name)
             reviewer = re.sub(r"^.*?\bby\s*", "", raw_name, flags=re.I)
             reviewer = re.sub(r"[:|].*$", "", reviewer)
             reviewer = re.sub(r"\s*-\s*.*$", "", reviewer).strip()
-        push(text, reviewer)
+        push(text, reviewer, reviewer_hidden)
 
     # 2. schema.org Review microdata
     for el in soup.find_all(attrs={"itemtype": re.compile(r"Review", re.I)}):

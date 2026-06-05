@@ -1506,18 +1506,25 @@ def _compare_reviews(old_reviews, new_reviews, service="Reviews 1") -> list:
     # Reviews are always rendered as a carousel widget
     review_type = "carousel"
 
+    def _vis(rv):
+        """Visible review text = reviewer name + quote (name is visible on the
+        page; only the 'five star review by' prefix is sr-only)."""
+        name = (rv.get("reviewer") or "").strip()
+        quote = (rv.get("text") or "").strip()
+        return f"{name} — {quote}" if name else quote
+
     for o in old_reviews:
         k = _review_key(o)
         n = new_keys.get(k)
         if n is not None:
             seen_new.add(k)
             rows.append(_row(service, 1, "REVIEW", "REVIEW",
-                             o.get("text", ""), "", o.get("reviewer", ""), review_type,
-                             n.get("text", ""), "", n.get("reviewer", ""), review_type,
+                             _vis(o), "", o.get("reviewer_hidden", ""), review_type,
+                             _vis(n), "", n.get("reviewer_hidden", ""), review_type,
                              "OK"))
         else:
             rows.append(_row(service, 1, "REVIEW", "",
-                             o.get("text", ""), "", o.get("reviewer", ""), review_type,
+                             _vis(o), "", o.get("reviewer_hidden", ""), review_type,
                              "", "", "", review_type,
                              "MISSING on new"))
 
@@ -1525,7 +1532,7 @@ def _compare_reviews(old_reviews, new_reviews, service="Reviews 1") -> list:
         if _review_key(n) not in seen_new:
             rows.append(_row(service, 1, "", "REVIEW",
                              "", "", "", review_type,
-                             n.get("text", ""), "", n.get("reviewer", ""), review_type,
+                             _vis(n), "", n.get("reviewer_hidden", ""), review_type,
                              "EXTRA on new"))
 
     return rows
