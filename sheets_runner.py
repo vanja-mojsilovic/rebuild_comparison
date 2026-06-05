@@ -448,6 +448,12 @@ def main():
         print("ERROR: SPREADSHEET_ID env var is not set", file=sys.stderr)
         sys.exit(1)
 
+    # When SKIP_JIRA is set (to 1/true/yes), the run writes all sheet tabs but
+    # does NOT post any Jira comments — used by the sheet-only workflow.
+    _skip_jira = os.environ.get("SKIP_JIRA", "").strip().lower() in ("1", "true", "yes")
+    if _skip_jira:
+        print("SKIP_JIRA set — Jira comments will not be posted.", flush=True)
+
     sheets = get_sheets_service()
 
     print("Reading URL pairs from sheet...", flush=True)
@@ -579,8 +585,11 @@ def main():
             )
             append_to_content(sheets, spreadsheet_id, content_rows)
 
-            # ---- Jira comment: one per URL pair when column C has an issue key.
-            if issue_key:
+            # ---- Jira comment: one per URL pair when column C has an issue
+            #      key, UNLESS the run opted out via SKIP_JIRA. The
+            #      sheet-only workflow sets SKIP_JIRA=1 so results land in the
+            #      sheet without touching Jira.
+            if issue_key and not _skip_jira:
                 comment = build_jira_comment(
                     restaurant,
                     new_data,
@@ -593,6 +602,8 @@ def main():
                 posted = post_jira_comment(issue_key, comment)
                 print(f"  jira: {issue_key} {'posted' if posted else 'skipped/failed'}",
                       flush=True)
+            elif issue_key and _skip_jira:
+                print(f"  jira: {issue_key} skipped (SKIP_JIRA set)", flush=True)
 
             ok = sum(1 for r in comparison_rows if r.get("match") == "OK")
             issues = len(comparison_rows) - ok
