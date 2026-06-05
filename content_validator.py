@@ -286,6 +286,12 @@ def _section_to_payload(section: dict, vid: str) -> dict:
     heading_parts = []
     for h in ("h1", "h2", "h3", "h4"):
         heading_parts.extend(section.get(h, []) or [])
+    # Drop template boilerplate headings that aren't author-written content and
+    # would draw spurious "awkward punctuation" / wording flags. The review
+    # SOURCE label ("Review by - Google", "Reviews by - Yelp") is SpotHopper's
+    # standard markup, identical on every reviews section — not a typo or a
+    # content choice to validate.
+    heading_parts = [p for p in heading_parts if not _is_template_boilerplate(p)]
     heading_text = " | ".join(p for p in heading_parts if p)
 
     body_parts = list(section.get("paragraphs", []) or [])
@@ -385,6 +391,24 @@ _MAP_ATTRIBUTION_LABELS = {
     "osm", "©", "© openstreetmap contributors", "openstreetmap contributors",
     "stamen", "stamen design", "maptiler", "here", "tomtom", "esri",
 }
+
+
+# Template-generated headings that are boilerplate, not author-written content.
+# The review SOURCE label ("Review by - Google", "Reviews by - Yelp") is
+# SpotHopper markup that's identical on every reviews section; its hyphen
+# punctuation is template output, not a content choice to flag.
+import re as __re_tb
+_REVIEW_SOURCE_HEADING_RE = __re_tb.compile(
+    r"^\s*reviews?\s+by\b", __re_tb.I
+)
+
+
+def _is_template_boilerplate(text: str) -> bool:
+    """True if `text` is a template boilerplate heading to exclude from
+    content/grammar validation."""
+    if not text:
+        return False
+    return bool(_REVIEW_SOURCE_HEADING_RE.match(text.strip()))
 
 
 def _is_decorative_media_control(text: str, service_type: str = "") -> bool:
