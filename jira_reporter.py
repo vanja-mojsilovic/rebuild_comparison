@@ -36,6 +36,35 @@ import urllib.error
 # Statuses the comparator emits that are acceptable (no action needed).
 _OK_STATUSES = ("OK", "EXPECTED")
 
+import re as _re_jr
+
+# Trailing " N" ordinal on a section name ("Reviews 1", "Hero 2").
+_ORDINAL_TAIL_RE = _re_jr.compile(r"\s+\d+\s*$")
+
+
+def _section_display_name(name: str) -> str:
+    """
+    Turn an ordinal section name into a human label for the Jira summary:
+    "Reviews 1" -> "Reviews section", "Hero 2" -> "Hero section". Names
+    without a trailing number get " section" appended too ("Footer" ->
+    "Footer section"). "MISSING"/"?" pass through unchanged.
+    """
+    n = (name or "").strip()
+    if not n or n in ("MISSING", "?"):
+        return n or "?"
+    base = _ORDINAL_TAIL_RE.sub("", n).strip()
+    if not base:
+        base = n
+    return f"{base} section"
+
+
+def _snippet(text: str, limit: int = 50) -> str:
+    """First `limit` characters of `text`, with an ellipsis when truncated."""
+    t = (text or "").strip()
+    if len(t) <= limit:
+        return t
+    return t[:limit].rstrip() + "..."
+
 
 def _seo_line(new_data: dict) -> tuple:
     """
@@ -94,21 +123,24 @@ def _elements_line(comparison_rows: list) -> tuple:
         match = (r.get("match") or "").strip()
         if match in _OK_STATUSES:
             continue
-        section = (r.get("old_section_name") or r.get("new_section_name")
-                   or r.get("service") or "?").strip()
+        raw_section = (r.get("old_section_name") or r.get("new_section_name")
+                       or r.get("service") or "?").strip()
+        section = _section_display_name(raw_section)
         oe = (r.get("old_element") or "").strip()
         ne = (r.get("new_element") or "").strip()
         elem = oe or ne or "element"
-        # Phrase by match kind.
+        o_text = _snippet(r.get("old_text"))
+        n_text = _snippet(r.get("new_text"))
+        # Phrase by match kind, including the relevant text snippet.
         if match.startswith("MISSING"):
-            issues.append(f"{section}: {oe or elem} missing on new")
+            issues.append(f"{section}: {oe or elem} missing on new — \"{o_text}\"")
         elif match.startswith("EXTRA"):
-            issues.append(f"{section}: {ne or elem} extra on new")
+            issues.append(f"{section}: {ne or elem} extra on new — \"{n_text}\"")
         elif match == "DIFFERS":
-            pair = f"{oe}->{ne}" if oe and ne and oe != ne else elem
-            issues.append(f"{section}: {pair} text differs")
+            label = f"{oe}->{ne}" if oe and ne and oe != ne else elem
+            issues.append(f"{section}: {label} text differs — \"{o_text}\" -> \"{n_text}\"")
         else:
-            issues.append(f"{section}: {elem} {match}")
+            issues.append(f"{section}: {elem} {match} — \"{o_text or n_text}\"")
     if not issues:
         return "OK", []
     return "ISSUES", issues
