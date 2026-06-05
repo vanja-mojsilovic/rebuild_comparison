@@ -707,6 +707,42 @@ def _move_match_status(old_rank: int, new_rank: int) -> str:
     return "OK"
 
 
+_REVIEW_PLATFORMS = (
+    "google", "yelp", "facebook", "tripadvisor", "trip advisor", "opentable",
+    "open table", "zomato", "foursquare", "grubhub", "doordash", "ubereats",
+    "uber eats", "instagram", "apple", "apple maps", "bing", "trustpilot",
+)
+
+
+def _review_source_platform(text: str) -> str:
+    """
+    If `text` is a review-SOURCE heading, return the normalized platform name
+    it names; otherwise "".
+
+    Matches both the full template form ("Review by - Google", "Reviews by -
+    Yelp") and the shortened rebuild form where only the platform survives
+    ("Google", "Yelp"). The bare-platform case only counts when the whole
+    heading IS just a known platform name, so ordinary headings that merely
+    mention a brand aren't swept in.
+    """
+    norm = _normalize(text)
+    if not norm:
+        return ""
+    # Full "review(s) by - <platform>" form: take the tail after "by".
+    m = re.match(r"^reviews?\s+by\b[\s\-:|]*(.+)$", norm)
+    if m:
+        tail = m.group(1).strip()
+        for p in _REVIEW_PLATFORMS:
+            if p in tail:
+                return p.replace(" ", "")
+        return tail.replace(" ", "") if tail else ""
+    # Bare platform name as the entire heading ("Google", "Yelp").
+    for p in _REVIEW_PLATFORMS:
+        if norm == p:
+            return p.replace(" ", "")
+    return ""
+
+
 def _token_set_ratio(a: str, b: str) -> float:
     """
     Jaccard overlap of the word-token sets of two strings (0..1). Robust to
@@ -776,19 +812,36 @@ def _compare_text_elements(service, pair_idx, old_sec, new_sec,
     for o_text, o_label, o_rank in old_items:
         o_hidden = old_hidden_map.get(o_text, "")
         matched_idx = None
+        match_status = None
         for idx, (n_text, n_label, n_rank) in enumerate(new_remaining):
             if _text_equiv(n_text, o_text):
                 matched_idx = idx
                 break
+        # Review-SOURCE heading match: "Review by - Google" (old) vs "Google"
+        # (new) name the same platform — the rebuild often drops the
+        # "Review by -" prefix and keeps just the source. Pair them by the
+        # extracted platform name as an EXPECTED template change.
+        if matched_idx is None:
+            o_src = _review_source_platform(o_text)
+            if o_src:
+                for idx, (n_text, n_label, n_rank) in enumerate(new_remaining):
+                    n_src = _review_source_platform(n_text)
+                    if n_src and n_src == o_src:
+                        matched_idx = idx
+                        match_status = "EXPECTED"
+                        break
         if matched_idx is not None:
             n_text, n_label, n_rank = new_remaining.pop(matched_idx)
             n_hidden = new_hidden_map.get(n_text, "")
-            status = _move_match_status(o_rank, n_rank)
-            # Visible text matches but the visually-hidden text differs (e.g.
-            # the new side added a "Visit us at" sr-only prefix) -> EXPECTED
-            # accessibility change rather than a plain OK.
-            if status == "OK" and _normalize(o_hidden) != _normalize(n_hidden):
-                status = "EXPECTED"
+            if match_status is not None:
+                status = match_status
+            else:
+                status = _move_match_status(o_rank, n_rank)
+                # Visible text matches but the visually-hidden text differs
+                # (e.g. the new side added a "Visit us at" sr-only prefix) ->
+                # EXPECTED accessibility change rather than a plain OK.
+                if status == "OK" and _normalize(o_hidden) != _normalize(n_hidden):
+                    status = "EXPECTED"
             rows.append(_row(service, pair_idx, o_label, n_label,
                              o_text, "", o_hidden, old_type,
                              n_text, "", n_hidden, new_type,
@@ -1689,13 +1742,26 @@ def _hrefs_expected_equivalent(old_href: str, new_href: str) -> bool:
     #   ...&callback_url=http://spot-sample-99698-website-v2.spotapps.co/
     # That's an EXPECTED base-URL swap, not a real link change. Neutralize the
     # value of those params to a constant before comparing.
+    #
+    # The old site also often serves pages through a CACHE host
+    # (wcache.spotapps.co/<long-restaurant-slug>-<page>?domain=<old-domain>),
+    # while the new site uses a clean slug (/about). The "?domain=" routing
+    # param is not real query content, so neutralize it too; the slug tail
+    # ("...-about" vs "/about") is then matched by Rule A below.
     def _strip_callback(s: str) -> str:
-        return re.sub(
+        s = re.sub(
             r"((?:callback_url|return_url|redirect_url|redirect|return_to|continue)=)[^&]*",
             r"\1CALLBACK",
             s,
             flags=re.I,
         )
+        # Drop the cache-routing "domain=" param entirely (it only appears on
+        # the old cache host and has no counterpart on the new clean URL), so
+        # the two query strings compare equal. Handle it whether it's preceded
+        # by ? / & or is the whole bare query string.
+        s = re.sub(r"(?:[?&])domain=[^&]*", "", s, flags=re.I)
+        s = re.sub(r"^domain=[^&]*&?", "", s, flags=re.I)
+        return s
 
     def _canon(s: str) -> str:
         return _strip_callback(_strip_version(s))
