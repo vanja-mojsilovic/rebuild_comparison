@@ -843,7 +843,10 @@ def extract_reviews(soup: BeautifulSoup) -> list:
                 class_=lambda c: c and ("reviewer" in c or "review-author" in c)
             ) or search_root.find(["h3", "h4"])
         if heading:
-            reviewer = re.sub(r"^.*?\bby\s*", "", heading.get_text(), flags=re.I)
+            # Collapse whitespace/newlines first so the strip regexes below
+            # behave predictably (the raw heading text spans multiple lines).
+            raw_name = _clean_text(heading.get_text())
+            reviewer = re.sub(r"^.*?\bby\s*", "", raw_name, flags=re.I)
             reviewer = re.sub(r"[:|].*$", "", reviewer)
             reviewer = re.sub(r"\s*-\s*.*$", "", reviewer).strip()
         push(text, reviewer)
