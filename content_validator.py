@@ -377,20 +377,19 @@ _WIDGET_FORM_LABELS = {
 def _is_decorative_media_control(text: str, service_type: str = "") -> bool:
     """
     True if `text` (lowercased visible+hidden) reads like a widget control that
-    validation should skip. `service_type` gates the context-dependent cases:
+    validation should skip.
 
-      * "+" / "−" zoom glyphs and a bare "Submit"/"Go"/"Subscribe" are only
-        treated as controls on map / newsletter / contact widgets (where the
-        prompt already exempts a11y checks). Elsewhere a lone "Submit" or "+"
-        may be a real content-free label worth flagging, so we DON'T skip it.
-      * Everything else (play/pause, dot-nav, prev/next arrows, gallery image
-        nav) is a control regardless of section.
+    Map zoom glyphs ("+", "−") and bare single-word form-submit labels
+    ("Submit", "Subscribe", "Go", …) are treated as controls EVERYWHERE, not
+    just on map/newsletter sections — these tokens are essentially never a
+    meaningful content CTA on a restaurant site, and the AI's section label
+    isn't reliable enough to gate on (a combined map+newsletter block may be
+    labeled "map", "contact", "other", etc.). Everything else (play/pause,
+    dot-nav, prev/next arrows, gallery nav) is also always a control.
     """
     stripped = text.strip()
-    svc = (service_type or "").lower()
-    widget_svc = svc in ("map", "newsletter", "contact")
 
-    # Context-free controls: always skip.
+    # Dot navigation ("Review 1", "Slide 2 content", incl. doubled forms).
     if _DOTNAV_RE.match(stripped):
         return True
     words = stripped.split()
@@ -398,23 +397,22 @@ def _is_decorative_media_control(text: str, service_type: str = "") -> bool:
         half = len(words) // 2
         if words[:half] == words[half:] and _DOTNAV_RE.match(" ".join(words[:half])):
             return True
+
+    # Media/widget control phrases (play/pause, prev/next, zoom in/out, …).
     if any(phrase in text for phrase in _MEDIA_CONTROL_PHRASES):
         return True
-    # Arrow glyphs are always carousel/gallery nav.
-    if stripped in {"‹", "›", "«", "»", "‹‹", "››", "&lsaquo;", "&rsaquo;",
-                    "&laquo;", "&raquo;", "←", "→", "◄", "►", "▲", "▼"}:
+
+    # Bare control glyphs: carousel/gallery arrows AND map zoom +/−.
+    if stripped in _MEDIA_CONTROL_GLYPHS:
         return True
 
-    # Context-dependent controls: only on map / newsletter / contact widgets.
-    if widget_svc:
-        if stripped in _MEDIA_CONTROL_GLYPHS:
-            return True
-        # collapse doubled "submit submit"
-        half_text = stripped
-        if len(words) % 2 == 0 and words[:len(words)//2] == words[len(words)//2:]:
-            half_text = " ".join(words[:len(words)//2])
-        if half_text in _WIDGET_FORM_LABELS:
-            return True
+    # Bare single-word form-submit labels ("submit", "subscribe", "go", …),
+    # including the doubled visible+hidden form ("submit submit").
+    half_text = stripped
+    if len(words) % 2 == 0 and words[:len(words) // 2] == words[len(words) // 2:]:
+        half_text = " ".join(words[:len(words) // 2])
+    if half_text in _WIDGET_FORM_LABELS:
+        return True
 
     return False
 
