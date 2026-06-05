@@ -31,6 +31,7 @@ from comparator import (
 )
 from ai_classifier import classify_sections_pair
 from content_validator import validate_sections, validate_reviews, analyze_all
+from jira_reporter import build_comment as build_jira_comment, post_comment as post_jira_comment
 
 
 # All report timestamps are written in Belgrade local time (Europe/Belgrade,
@@ -163,9 +164,14 @@ def get_sheets_service():
 
 
 def read_url_pairs(service, spreadsheet_id):
+    """
+    Read the urls tab. Columns: A = old URL, B = new URL, C = Jira issue key
+    (optional). Returns a list of (old_url, new_url, issue_key) tuples;
+    issue_key is "" when column C is empty.
+    """
     result = service.spreadsheets().values().get(
         spreadsheetId=spreadsheet_id,
-        range=f"{URLS_TAB}!A:B",
+        range=f"{URLS_TAB}!A:C",
     ).execute()
     rows = result.get("values", [])
     if not rows:
@@ -176,8 +182,9 @@ def read_url_pairs(service, spreadsheet_id):
         if len(row) < 2:
             continue
         old, new = (row[0] or "").strip(), (row[1] or "").strip()
+        issue_key = (row[2].strip() if len(row) > 2 and row[2] else "")
         if old and new and old.startswith("http") and new.startswith("http"):
-            pairs.append((old, new))
+            pairs.append((old, new, issue_key))
     return pairs
 
 
@@ -457,7 +464,7 @@ def main():
     timestamp = datetime.now(REPORT_TZ).strftime("%Y-%m-%d %H:%M:%S %Z")
     failures = 0
 
-    for i, (old_url, new_url) in enumerate(pairs, start=1):
+    for i, (old_url, new_url, issue_key) in enumerate(pairs, start=1):
         print(f"\n[{i}/{len(pairs)}] {old_url}  →  {new_url}", flush=True)
         try:
             old_data = scrape_page(old_url)
@@ -541,6 +548,7 @@ def main():
             # ---- custom tab: old↔new COMPARISON of the custom pages, using the
             #      per-page labels the single AI call already produced.
             custom_total = 0
+            custom_results = []  # for the Jira summary: [{kind, rows}]
             custom_labels = ai["custom_labels"]
             for c in custom_scraped:
                 kind = c["kind"]
@@ -560,6 +568,7 @@ def main():
                 )
                 append_to_custom(sheets, spreadsheet_id, custom_rows)
                 custom_total += len(custom_rows)
+                custom_results.append({"kind": kind, "rows": page_rows})
 
             # ---- content tab (NEW site only): home-page typo / review issues
             #      from the same single AI call.
@@ -569,6 +578,21 @@ def main():
                 restaurant, timestamp, content_section_results, content_review_results
             )
             append_to_content(sheets, spreadsheet_id, content_rows)
+
+            # ---- Jira comment: one per URL pair when column C has an issue key.
+            if issue_key:
+                comment = build_jira_comment(
+                    restaurant,
+                    new_data,
+                    section_pairs,
+                    comparison_rows,
+                    content_section_results,
+                    content_review_results,
+                    custom_results,
+                )
+                posted = post_jira_comment(issue_key, comment)
+                print(f"  jira: {issue_key} {'posted' if posted else 'skipped/failed'}",
+                      flush=True)
 
             ok = sum(1 for r in comparison_rows if r.get("match") == "OK")
             issues = len(comparison_rows) - ok
