@@ -1664,7 +1664,8 @@ def _hrefs_expected_equivalent(old_href: str, new_href: str) -> bool:
     if o == n:
         return False  # identical handled elsewhere (OK / cosmetic-EXPECTED)
 
-    # --- Rule B: differ only by a website-vN version token ---
+    # --- Rule B: differ only by a website-vN version token, OR only by the
+    # host carried inside a callback_url / redirect param ---
     # Replace any "website-vN" / "-vN-" / "vN" version markers with a constant
     # and see if the URLs become equal.
     def _strip_version(s: str) -> str:
@@ -1672,15 +1673,36 @@ def _hrefs_expected_equivalent(old_href: str, new_href: str) -> bool:
         s = re.sub(r"(spot-sample-\d+-)v\d+", r"\1vX", s)
         s = re.sub(r"[-_/]v\d+\b", "/vX", s)
         return s
-    if _strip_version(o) == _strip_version(n):
+
+    # Many SpotHopper widgets embed the site's OWN base URL in a query
+    # parameter (callback_url, return_url, redirect, etc.) so the widget can
+    # send the visitor back. On a rebuild that parameter changes from the old
+    # domain to the new domain — e.g.
+    #   ...&callback_url=http://omakaselv.com/
+    #   ...&callback_url=http://spot-sample-99698-website-v2.spotapps.co/
+    # That's an EXPECTED base-URL swap, not a real link change. Neutralize the
+    # value of those params to a constant before comparing.
+    def _strip_callback(s: str) -> str:
+        return re.sub(
+            r"((?:callback_url|return_url|redirect_url|redirect|return_to|continue)=)[^&]*",
+            r"\1CALLBACK",
+            s,
+            flags=re.I,
+        )
+
+    def _canon(s: str) -> str:
+        return _strip_callback(_strip_version(s))
+
+    if _canon(o) == _canon(n):
         return True
 
     # --- Rule A: slug shortening on the path tail ---
     o_path, o_query = _href_path_and_query(old_href)
     n_path, n_query = _href_path_and_query(new_href)
     # Only treat as slug-shortening when the query strings agree (ignoring
-    # the version handled above) — a different query is a real change.
-    if _strip_version(o_query) == _strip_version(n_query):
+    # the version + callback host handled above) — a different query is a
+    # real change.
+    if _canon(o_query) == _canon(n_query):
         o_seg = o_path.rstrip("/").split("/")[-1]
         n_seg = n_path.rstrip("/").split("/")[-1]
         if o_seg and n_seg and o_seg != n_seg:
