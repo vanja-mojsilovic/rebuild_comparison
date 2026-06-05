@@ -376,6 +376,16 @@ _WIDGET_FORM_LABELS = {
     "submit", "go", "search", "subscribe", "sign up", "send",
 }
 
+# Map attribution / credit links injected by map libraries (Leaflet + the tile
+# providers). They're standard copyright links, not content CTAs, so a11y
+# validation should ignore them.
+_MAP_ATTRIBUTION_LABELS = {
+    "leaflet", "openstreetmap", "open street map", "cartodb", "carto",
+    "mapbox", "google", "google maps", "improve this map",
+    "osm", "©", "© openstreetmap contributors", "openstreetmap contributors",
+    "stamen", "stamen design", "maptiler", "here", "tomtom", "esri",
+}
+
 
 def _is_decorative_media_control(text: str, service_type: str = "") -> bool:
     """
@@ -415,6 +425,10 @@ def _is_decorative_media_control(text: str, service_type: str = "") -> bool:
     if len(words) % 2 == 0 and words[:len(words) // 2] == words[len(words) // 2:]:
         half_text = " ".join(words[:len(words) // 2])
     if half_text in _WIDGET_FORM_LABELS:
+        return True
+
+    # Map attribution / credit links (Leaflet, OpenStreetMap, CartoDB, …).
+    if stripped in _MAP_ATTRIBUTION_LABELS or half_text in _MAP_ATTRIBUTION_LABELS:
         return True
 
     return False
