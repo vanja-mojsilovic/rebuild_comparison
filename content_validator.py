@@ -298,6 +298,15 @@ def _section_to_payload(section: dict, vid: str) -> dict:
         hidden = (b.get("hidden_text") or "").strip()
         if not (visible or hidden):
             continue
+        # Skip decorative media controls (play/pause for a background video,
+        # slideshow, or reviews carousel). Their sr-only text intentionally
+        # restates the control state/label, which the validator would
+        # otherwise flag as REDUNDANT — a false positive, since these are
+        # accessibility affordances rather than content links. Detect them by
+        # the characteristic control phrasing in the visible OR hidden text.
+        combined = f"{visible} {hidden}".lower()
+        if _is_decorative_media_control(combined):
+            continue
         sr = (visible + " " + hidden).strip()
         interactive.append({
             "visible": visible,
@@ -312,6 +321,55 @@ def _section_to_payload(section: dict, vid: str) -> dict:
         "body_text": body_text,
         "interactive": interactive,
     }
+
+
+# Phrases that mark a button as a decorative media control (background-video,
+# slideshow, or carousel play/pause/navigation) rather than a content link.
+# Validation skips these so their intentionally-restated sr-only text isn't
+# flagged as REDUNDANT.
+_MEDIA_CONTROL_PHRASES = (
+    "decorative video",
+    "video is currently",
+    "play the video", "pause the video",
+    "slideshow is currently", "play the slideshow", "pause the slideshow",
+    "carousel is currently", "play the carousel", "pause the carousel",
+    "start stop", "reviews carousel",
+    "previous slide", "next slide",
+    "previous review", "next review",
+    "slide content",
+)
+
+# Bare arrow glyphs used as carousel/slideshow prev/next controls. When a
+# control has no descriptive text at all (just the glyph), match it directly.
+_MEDIA_CONTROL_GLYPHS = {
+    "‹", "›", "«", "»", "<", ">", "‹‹", "››",
+    "&lsaquo;", "&rsaquo;", "&laquo;", "&raquo;",
+    "←", "→", "◄", "►", "▲", "▼",
+}
+
+# Dot-navigation labels like "Review 1", "Slide 3", "Go to slide 2" — the
+# carousel's positional dots, not content.
+import re as _re
+_DOTNAV_RE = _re.compile(
+    r"^(?:go to\s+)?(?:review|slide|item|page)\s*\d+(?:\s+content)?$", _re.I
+)
+
+
+def _is_decorative_media_control(text: str) -> bool:
+    """True if `text` (lowercased visible+hidden) reads like a media control."""
+    stripped = text.strip()
+    if stripped in _MEDIA_CONTROL_GLYPHS:
+        return True
+    if _DOTNAV_RE.match(stripped):
+        return True
+    # The combined string is often the visible label repeated as hidden text
+    # ("review 1 review 1"); collapse a doubled half before the dot-nav test.
+    words = stripped.split()
+    if len(words) % 2 == 0:
+        half = len(words) // 2
+        if words[:half] == words[half:] and _DOTNAV_RE.match(" ".join(words[:half])):
+            return True
+    return any(phrase in text for phrase in _MEDIA_CONTROL_PHRASES)
 
 
 # ──────────────────────────────────────────────────────────────────────────
