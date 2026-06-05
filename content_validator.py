@@ -426,3 +426,266 @@ def validate_reviews(restaurant: str, reviews: list) -> list:
             "issue": issue,
         })
     return out
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# UNIFIED SINGLE-CALL ORCHESTRATOR
+# ══════════════════════════════════════════════════════════════════════════
+# Collapses all per-pair AI work into ONE OpenAI request:
+#   * classify the home page's sections (both sites)
+#   * validate the new home page's sections (typo / a11y)
+#   * validate the new home page's reviews (review rules)
+#   * classify each custom page's sections (both sites)
+# The model returns ONE JSON object with four keys; we split it back out.
+
+# Pulled from ai_classifier so the classification half uses the exact same
+# label set and per-section payload the standalone classifier used.
+from ai_classifier import (
+    ALLOWED_LABELS as _CLS_LABELS,
+    _section_payload as _cls_section_payload,
+)
+
+
+def _build_unified_prompt(restaurant: str,
+                          home_classify_json: str,
+                          home_sections_json: str,
+                          home_reviews_json: str,
+                          custom_classify_json: str) -> str:
+    """
+    Build ONE prompt covering four tasks. Each task keeps the wording of its
+    standalone prompt so behavior matches the per-call versions; they're just
+    delivered together and answered in one combined JSON object.
+    """
+    allowed = ", ".join(f'"{lbl}"' for lbl in _CLS_LABELS)
+    return f"""You are analyzing the website of the restaurant "{restaurant}".
+You have FOUR independent tasks. Do every task. Return ONE JSON object (no
+markdown fences) with EXACTLY these four keys: "home_labels",
+"home_section_issues", "home_review_issues", "custom_labels". Each value is a
+JSON array as described in its task. If a task's input list is empty, return
+an empty array for that key.
+
+═══════════════════════════════════════════════════════════════════════════
+TASK 1 — CLASSIFY HOME-PAGE SECTIONS  →  key "home_labels"
+═══════════════════════════════════════════════════════════════════════════
+For each section, return ONE label that best describes its PURPOSE, chosen
+from exactly this list:
+[{allowed}]
+Read all signals together (heading, paragraphs, button visible + hidden text,
+button hrefs — match slugs by SUBSTRING). The SAME logical section on the old
+and new site MUST get the SAME label. Output array elements:
+  {{"id": "<the input id, e.g. old_0 / new_2>", "label": "<one allowed label>"}}
+
+Sections to classify:
+{home_classify_json}
+
+═══════════════════════════════════════════════════════════════════════════
+TASK 2 — VALIDATE HOME-PAGE SECTIONS  →  key "home_section_issues"
+═══════════════════════════════════════════════════════════════════════════
+For each section check (A) SPELLING & GRAMMAR in `heading` and `body_text`
+word-by-word (letter transposition like "Tialored"→"Tailored"; missing/extra
+letters like "untill"→"until"; homophones like "bellow"→"below"; doubled
+words; missing spaces; the U+FFFD character \ufffd), and (B) ACCESSIBILITY of
+interactive elements (`screen_reader_reads` should be a clear action label;
+flag content-free labels like "Click Here"/"Submit" with no clarifying hidden
+text; flag REDUNDANT hidden text repeating the visible text). Skip a11y checks
+for service_type "map"/"newsletter"/"contact".
+{_ENTITY_SUPPRESSION_RULE}
+{_SOCIAL_LABEL_SUPPRESSION_RULE}
+Do NOT flag missing headings, repeated CTAs, minor name variations, Title
+Case / ALL CAPS, or <br> separators. Output array elements:
+  {{"id": "<section id>", "issue": "OK: <note>" or "POTENTIAL ISSUE: <detail>"}}
+List multiple problems in one issue string separated by " | ".
+
+Sections to validate:
+{home_sections_json}
+
+═══════════════════════════════════════════════════════════════════════════
+TASK 3 — VALIDATE HOME-PAGE REVIEWS  →  key "home_review_issues"
+═══════════════════════════════════════════════════════════════════════════
+Check each review against these rules:
+- no specific price/pricetag (e.g. $20)
+- must not name another business (NAMED competitors only; generic "another
+  spot" is fine)
+- must not contain a worker's / any person's name INSIDE the review text
+{_REVIEWER_NAME_RULE}
+- positive tone only; no swearing; must not say it is expensive
+- must not contain the U+FFFD character (\ufffd)
+- if the reviewer name is Tina, Carlos or Cris, or the text reads like
+  "This is the n-th example", flag it
+{_ENTITY_SUPPRESSION_RULE}
+Output array elements:
+  {{"id": "<review id>", "issue": "OK: <note>" or "POTENTIAL ISSUE: <detail>"}}
+
+Reviews to validate:
+{home_reviews_json}
+
+═══════════════════════════════════════════════════════════════════════════
+TASK 4 — CLASSIFY CUSTOM-PAGE SECTIONS  →  key "custom_labels"
+═══════════════════════════════════════════════════════════════════════════
+Same rules as TASK 1 (same allowed label list, same SUBSTRING slug matching,
+same old/new consistency). These sections come from other pages (press /
+locations / parties / cater / reserve / about); each id is prefixed with its
+page, e.g. "press::old_0", "press::new_1", "locations::old_0". Echo the id
+back UNCHANGED. Output array elements:
+  {{"id": "<page::side_index>", "label": "<one allowed label>"}}
+
+Sections to classify:
+{custom_classify_json}
+
+═══════════════════════════════════════════════════════════════════════════
+Return ONLY the single JSON object with the four keys. No prose, no fences."""
+
+
+def _validation_payload(section: dict, vid: str) -> dict:
+    """Section → {id, service_type, heading, body_text, interactive} for TASK 2."""
+    return _section_to_payload(section, vid)
+
+
+def analyze_all(restaurant: str,
+                home_old_sections: list,
+                home_new_sections: list,
+                home_new_reviews: list,
+                custom_pages: list) -> dict:
+    """
+    ONE OpenAI call covering classification + validation for the home page and
+    classification for every custom page.
+
+    custom_pages: list of {"kind": str, "old_sections": list, "new_sections": list}
+
+    Returns:
+      {
+        "home_labels":        {"old_0": "catering", "new_1": "reviews", ...},
+        "home_section_issues":[{section_index, service_type, heading, status, issue}, ...],
+        "home_review_issues": [{review_index, reviewer, text, status, issue}, ...],
+        "custom_labels":      {"press": {"old_0": "...", "new_1": "..."}, ...},
+      }
+    Empty / safe defaults on any failure (no key, no SDK, parse error).
+    """
+    empty = {
+        "home_labels": {},
+        "home_section_issues": [],
+        "home_review_issues": [],
+        "custom_labels": {},
+    }
+    client = _get_client()
+    if client is None:
+        return empty
+
+    # ---- TASK 1 payload: home section classification (both sides) ----
+    home_classify = []
+    for i, sec in enumerate(home_old_sections):
+        home_classify.append({"id": f"old_{i}", **_cls_section_payload(sec)})
+    for i, sec in enumerate(home_new_sections):
+        home_classify.append({"id": f"new_{i}", **_cls_section_payload(sec)})
+
+    # ---- TASK 2 payload: home section validation (new side) ----
+    home_sections_val = []
+    home_val_tracked = []  # (vid, index, section)
+    for idx, sec in enumerate(home_new_sections):
+        if sec is None or (sec.get("ai_service") or "") in ("footer", "header", "other"):
+            continue
+        vid = f"s{idx}"
+        payload = _validation_payload(sec, vid)
+        if payload["heading"] or payload["body_text"] or payload["interactive"]:
+            home_sections_val.append(payload)
+            home_val_tracked.append((vid, idx, sec))
+
+    # ---- TASK 3 payload: home reviews (new side) ----
+    home_reviews_val = []
+    home_review_tracked = []  # (vid, index, review)
+    for idx, rv in enumerate(home_new_reviews or []):
+        text = (rv.get("text") or "").strip()
+        if not text:
+            continue
+        vid = f"r{idx}"
+        home_reviews_val.append({
+            "id": vid,
+            "reviewer": (rv.get("reviewer") or "Unknown").strip() or "Unknown",
+            "text": text,
+        })
+        home_review_tracked.append((vid, idx, rv))
+
+    # ---- TASK 4 payload: custom-page classification (both sides per page) ----
+    custom_classify = []
+    for page in custom_pages or []:
+        kind = page["kind"]
+        for i, sec in enumerate(page.get("old_sections", [])):
+            custom_classify.append({"id": f"{kind}::old_{i}", **_cls_section_payload(sec)})
+        for i, sec in enumerate(page.get("new_sections", [])):
+            custom_classify.append({"id": f"{kind}::new_{i}", **_cls_section_payload(sec)})
+
+    # If there is genuinely nothing to do, skip the call.
+    if not (home_classify or home_sections_val or home_reviews_val or custom_classify):
+        return empty
+
+    prompt = _build_unified_prompt(
+        restaurant,
+        json.dumps(home_classify, indent=2),
+        json.dumps(home_sections_val, indent=2),
+        json.dumps(home_reviews_val, indent=2),
+        json.dumps(custom_classify, indent=2),
+    )
+
+    raw = _call_openai(client, prompt, budget=16000)
+    try:
+        data = json.loads(_strip_fences(raw))
+        if not isinstance(data, dict):
+            raise ValueError("top-level JSON is not an object")
+    except (json.JSONDecodeError, ValueError) as e:
+        print(f"[content_validator] could not parse unified JSON: {e}", file=sys.stderr)
+        return empty
+
+    # ---- Split TASK 1 ----
+    home_labels = {}
+    for item in data.get("home_labels", []) or []:
+        if isinstance(item, dict) and item.get("id"):
+            home_labels[item["id"]] = item.get("label", "")
+
+    # ---- Split TASK 2 ----
+    sec_issue_map = {item.get("id"): item.get("issue", "OK: no detailed response")
+                     for item in (data.get("home_section_issues", []) or [])
+                     if isinstance(item, dict)}
+    home_section_issues = []
+    for vid, idx, sec in home_val_tracked:
+        issue = sec_issue_map.get(vid, "OK: no detailed response")
+        payload = _validation_payload(sec, vid)
+        home_section_issues.append({
+            "section_index": idx,
+            "service_type": payload["service_type"],
+            "heading": payload["heading"],
+            "status": "POTENTIAL ISSUE" if "POTENTIAL ISSUE" in issue else "OK",
+            "issue": issue,
+        })
+
+    # ---- Split TASK 3 ----
+    rev_issue_map = {item.get("id"): item.get("issue", "OK: no detailed response")
+                     for item in (data.get("home_review_issues", []) or [])
+                     if isinstance(item, dict)}
+    home_review_issues = []
+    for vid, idx, rv in home_review_tracked:
+        issue = rev_issue_map.get(vid, "OK: no detailed response")
+        home_review_issues.append({
+            "review_index": idx,
+            "reviewer": (rv.get("reviewer") or "Unknown"),
+            "text": (rv.get("text") or ""),
+            "status": "POTENTIAL ISSUE" if "POTENTIAL ISSUE" in issue else "OK",
+            "issue": issue,
+        })
+
+    # ---- Split TASK 4 ----
+    custom_labels = {}
+    for item in data.get("custom_labels", []) or []:
+        if not (isinstance(item, dict) and item.get("id")):
+            continue
+        cid = item["id"]
+        if "::" not in cid:
+            continue
+        kind, key = cid.split("::", 1)
+        custom_labels.setdefault(kind, {})[key] = item.get("label", "")
+
+    return {
+        "home_labels": home_labels,
+        "home_section_issues": home_section_issues,
+        "home_review_issues": home_review_issues,
+        "custom_labels": custom_labels,
+    }

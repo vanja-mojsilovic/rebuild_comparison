@@ -30,7 +30,7 @@ from comparator import (
     summarize_h1,
 )
 from ai_classifier import classify_sections_pair
-from content_validator import validate_sections, validate_reviews
+from content_validator import validate_sections, validate_reviews, analyze_all
 
 
 # All report timestamps are written in Belgrade local time (Europe/Belgrade,
@@ -468,21 +468,47 @@ def main():
                 or "(unknown)"
             )
 
-            # ---- AI section classification (runs FIRST so its labels feed
-            #      both the report tab's Service column and the sections tab's
-            #      section-name columns). Returns {} if the API key is missing
-            #      or anything goes wrong, in which case the regex classifier
-            #      provides the labels and the AI columns just stay empty.
-            ai_labels = classify_sections_pair(
+            # ---- Scrape the custom pages up front (no AI yet) so ALL AI work
+            #      for this URL pair can go in a SINGLE OpenAI request.
+            old_pages = find_relevant_page_urls(old_data)
+            new_pages = find_relevant_page_urls(new_data)
+            shared_kinds = [k for k in new_pages if k in old_pages]
+
+            custom_scraped = []  # {kind, o_url, n_url, o_page, n_page}
+            for kind in shared_kinds:
+                o_url = old_pages[kind]
+                n_url = new_pages[kind]
+                try:
+                    o_page = scrape_page(o_url)
+                    n_page = scrape_page(n_url)
+                except Exception as pe:
+                    print(f"    custom: failed to scrape {kind} "
+                          f"({o_url} / {n_url}): {pe}", flush=True)
+                    continue
+                custom_scraped.append({
+                    "kind": kind, "o_url": o_url, "n_url": n_url,
+                    "o_page": o_page, "n_page": n_page,
+                })
+
+            # ---- ONE AI call: home classification + home section/review
+            #      validation + every custom page's classification, all in a
+            #      single request. Returns safe empty defaults on any failure.
+            ai = analyze_all(
                 restaurant,
                 old_data.get("sections", []),
                 new_data.get("sections", []),
+                new_data.get("reviews", []),
+                [{"kind": c["kind"],
+                  "old_sections": c["o_page"].get("sections", []),
+                  "new_sections": c["n_page"].get("sections", [])}
+                 for c in custom_scraped],
             )
 
-            # Inject AI labels onto each section dict so classify_service()
-            # in the comparator picks them up automatically — this routes
-            # the AI's label through every downstream step (service grouping,
-            # section pairing, section name resolution) consistently.
+            ai_labels = ai["home_labels"]
+
+            # Inject home AI labels onto each section dict so classify_service()
+            # in the comparator picks them up (routes the label through service
+            # grouping, section pairing, and section-name resolution).
             for idx, sec in enumerate(old_data.get("sections", [])):
                 lbl = ai_labels.get(f"old_{idx}")
                 if lbl:
@@ -512,31 +538,14 @@ def main():
             )
             append_to_seo(sheets, spreadsheet_id, seo_rows)
 
-            # ---- custom tab: old↔new COMPARISON of the custom pages
-            #      (press / locations / parties / cater / reserve / about).
-            #      A page is compared only when it exists in BOTH the old and
-            #      new navs. Each side's URL comes from that side's own nav.
-            old_pages = find_relevant_page_urls(old_data)
-            new_pages = find_relevant_page_urls(new_data)
-            shared_kinds = [k for k in new_pages if k in old_pages]
+            # ---- custom tab: old↔new COMPARISON of the custom pages, using the
+            #      per-page labels the single AI call already produced.
             custom_total = 0
-            for kind in shared_kinds:
-                o_url = old_pages[kind]
-                n_url = new_pages[kind]
-                try:
-                    o_page = scrape_page(o_url)
-                    n_page = scrape_page(n_url)
-                except Exception as pe:
-                    print(f"    custom: failed to scrape {kind} "
-                          f"({o_url} / {n_url}): {pe}", flush=True)
-                    continue
-                # Re-use the AI classifier so the custom-page comparison gets
-                # the same ordinal section names as the report tab.
-                page_ai = classify_sections_pair(
-                    restaurant,
-                    o_page.get("sections", []),
-                    n_page.get("sections", []),
-                )
+            custom_labels = ai["custom_labels"]
+            for c in custom_scraped:
+                kind = c["kind"]
+                o_page, n_page = c["o_page"], c["n_page"]
+                page_ai = custom_labels.get(kind, {})
                 for idx, sec in enumerate(o_page.get("sections", [])):
                     lbl = page_ai.get(f"old_{idx}")
                     if lbl:
@@ -547,20 +556,15 @@ def main():
                         sec["ai_service"] = lbl
                 page_rows = build_validated_rows(o_page, n_page)
                 custom_rows = build_custom_tab_rows(
-                    kind, timestamp, restaurant, o_url, n_url, page_rows
+                    kind, timestamp, restaurant, c["o_url"], c["n_url"], page_rows
                 )
                 append_to_custom(sheets, spreadsheet_id, custom_rows)
                 custom_total += len(custom_rows)
 
-            # ---- content tab (NEW site only): typo / strange-content checks on
-            #      the HOME-page sections + review-rule checks. Skipped silently
-            #      if the OpenAI key/SDK is unavailable (returns []).
-            content_section_results = validate_sections(
-                restaurant, new_data.get("sections", [])
-            )
-            content_review_results = validate_reviews(
-                restaurant, new_data.get("reviews", [])
-            )
+            # ---- content tab (NEW site only): home-page typo / review issues
+            #      from the same single AI call.
+            content_section_results = ai["home_section_issues"]
+            content_review_results = ai["home_review_issues"]
             content_rows = build_content_tab_rows(
                 restaurant, timestamp, content_section_results, content_review_results
             )
