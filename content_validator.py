@@ -305,7 +305,7 @@ def _section_to_payload(section: dict, vid: str) -> dict:
         # accessibility affordances rather than content links. Detect them by
         # the characteristic control phrasing in the visible OR hidden text.
         combined = f"{visible} {hidden}".lower()
-        if _is_decorative_media_control(combined):
+        if _is_decorative_media_control(combined, section.get("ai_service") or ""):
             continue
         sr = (visible + " " + hidden).strip()
         interactive.append({
@@ -323,10 +323,11 @@ def _section_to_payload(section: dict, vid: str) -> dict:
     }
 
 
-# Phrases that mark a button as a decorative media control (background-video,
-# slideshow, or carousel play/pause/navigation) rather than a content link.
-# Validation skips these so their intentionally-restated sr-only text isn't
-# flagged as REDUNDANT.
+# Phrases that mark a button as a decorative / functional widget control
+# (background-video, slideshow, carousel, gallery, or map) rather than a
+# content link. Validation skips these so their intentionally-restated sr-only
+# text isn't flagged as REDUNDANT and their terse glyphs aren't flagged as
+# unclear labels — they're widget affordances, not content CTAs.
 _MEDIA_CONTROL_PHRASES = (
     "decorative video",
     "video is currently",
@@ -336,40 +337,86 @@ _MEDIA_CONTROL_PHRASES = (
     "start stop", "reviews carousel",
     "previous slide", "next slide",
     "previous review", "next review",
+    "previous image", "next image",
+    "previous photo", "next photo",
     "slide content",
+    # Map controls
+    "zoom in", "zoom out", "reset zoom", "zoom map",
+    "rotate the view", "rotate clockwise", "rotate counterclockwise",
 )
 
-# Bare arrow glyphs used as carousel/slideshow prev/next controls. When a
-# control has no descriptive text at all (just the glyph), match it directly.
+# Bare glyphs used as widget controls with no descriptive text. When a control
+# is just the glyph, match it directly: carousel/gallery prev-next arrows and
+# map zoom +/− buttons.
 _MEDIA_CONTROL_GLYPHS = {
+    # prev / next arrows
     "‹", "›", "«", "»", "<", ">", "‹‹", "››",
     "&lsaquo;", "&rsaquo;", "&laquo;", "&raquo;",
     "←", "→", "◄", "►", "▲", "▼",
+    # map zoom controls
+    "+", "−", "-", "–", "—",
 }
 
 # Dot-navigation labels like "Review 1", "Slide 3", "Go to slide 2" — the
 # carousel's positional dots, not content.
 import re as _re
 _DOTNAV_RE = _re.compile(
-    r"^(?:go to\s+)?(?:review|slide|item|page)\s*\d+(?:\s+content)?$", _re.I
+    r"^(?:go to\s+)?(?:review|slide|item|page|image|photo)\s*\d+(?:\s+content)?$",
+    _re.I,
 )
 
+# Form-submit / generic widget buttons whose label is functionally complete on
+# its own (a newsletter "Submit", a search "Go"). These belong to map /
+# newsletter / contact widgets the prompt already exempts; skip them here too
+# so they aren't flagged as "content-free".
+_WIDGET_FORM_LABELS = {
+    "submit", "go", "search", "subscribe", "sign up", "send",
+}
 
-def _is_decorative_media_control(text: str) -> bool:
-    """True if `text` (lowercased visible+hidden) reads like a media control."""
+
+def _is_decorative_media_control(text: str, service_type: str = "") -> bool:
+    """
+    True if `text` (lowercased visible+hidden) reads like a widget control that
+    validation should skip. `service_type` gates the context-dependent cases:
+
+      * "+" / "−" zoom glyphs and a bare "Submit"/"Go"/"Subscribe" are only
+        treated as controls on map / newsletter / contact widgets (where the
+        prompt already exempts a11y checks). Elsewhere a lone "Submit" or "+"
+        may be a real content-free label worth flagging, so we DON'T skip it.
+      * Everything else (play/pause, dot-nav, prev/next arrows, gallery image
+        nav) is a control regardless of section.
+    """
     stripped = text.strip()
-    if stripped in _MEDIA_CONTROL_GLYPHS:
-        return True
+    svc = (service_type or "").lower()
+    widget_svc = svc in ("map", "newsletter", "contact")
+
+    # Context-free controls: always skip.
     if _DOTNAV_RE.match(stripped):
         return True
-    # The combined string is often the visible label repeated as hidden text
-    # ("review 1 review 1"); collapse a doubled half before the dot-nav test.
     words = stripped.split()
     if len(words) % 2 == 0:
         half = len(words) // 2
         if words[:half] == words[half:] and _DOTNAV_RE.match(" ".join(words[:half])):
             return True
-    return any(phrase in text for phrase in _MEDIA_CONTROL_PHRASES)
+    if any(phrase in text for phrase in _MEDIA_CONTROL_PHRASES):
+        return True
+    # Arrow glyphs are always carousel/gallery nav.
+    if stripped in {"‹", "›", "«", "»", "‹‹", "››", "&lsaquo;", "&rsaquo;",
+                    "&laquo;", "&raquo;", "←", "→", "◄", "►", "▲", "▼"}:
+        return True
+
+    # Context-dependent controls: only on map / newsletter / contact widgets.
+    if widget_svc:
+        if stripped in _MEDIA_CONTROL_GLYPHS:
+            return True
+        # collapse doubled "submit submit"
+        half_text = stripped
+        if len(words) % 2 == 0 and words[:len(words)//2] == words[len(words)//2:]:
+            half_text = " ".join(words[:len(words)//2])
+        if half_text in _WIDGET_FORM_LABELS:
+            return True
+
+    return False
 
 
 # ──────────────────────────────────────────────────────────────────────────
