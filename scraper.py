@@ -672,6 +672,14 @@ def _section_data(el: Tag) -> dict:
         if not combined:
             continue
 
+        # full_text is the element's text in DOM order — i.e. exactly what a
+        # screen reader announces (e.g. "Call us at (608)-678-2325" when an
+        # sr-only "Call us at " span precedes the visible number). Preserve it
+        # as screen_reader_text so downstream a11y validation judges the REAL
+        # reading order rather than a naive visible+hidden concatenation
+        # (which would wrongly put the value before its label).
+        screen_reader_text = full_text or combined
+
         href = clickable.get("href") or ""
         if not href:
             inner_a = clickable.find("a", href=True)
@@ -682,6 +690,7 @@ def _section_data(el: Tag) -> dict:
             "text": combined,
             "visible_text": visible_text,
             "hidden_text": hidden_text,
+            "screen_reader_text": screen_reader_text,
             "href": href,
         })
 

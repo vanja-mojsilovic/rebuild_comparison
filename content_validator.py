@@ -307,7 +307,10 @@ def _section_to_payload(section: dict, vid: str) -> dict:
         combined = f"{visible} {hidden}".lower()
         if _is_decorative_media_control(combined, section.get("ai_service") or ""):
             continue
-        sr = (visible + " " + hidden).strip()
+        # Prefer the scraper's DOM-ordered reading (what a screen reader
+        # actually announces) so the validator judges the real order. Fall
+        # back to visible+hidden only when the scraper didn't supply it.
+        sr = (b.get("screen_reader_text") or "").strip() or (visible + " " + hidden).strip()
         interactive.append({
             "visible": visible,
             "hidden": hidden,
