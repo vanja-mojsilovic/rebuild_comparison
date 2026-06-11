@@ -209,7 +209,7 @@ def build_comment(restaurant: str,
     ]
     label_w = max(len(label) for label, _ in table)
 
-    lines = [f"Rebuild automation validation: {restaurant}", ""]
+    lines = [f"{VALIDATION_MARKER}: {restaurant}", ""]
     lines.append(f"{'Check'.ljust(label_w)} | Status")
     lines.append(f"{'-' * label_w}-+-{'-' * 12}")
     for label, status in table:
@@ -243,6 +243,65 @@ def _jira_config() -> tuple:
     email = os.environ.get("JIRA_EMAIL") or ""
     token = os.environ.get("JIRA_API_TOKEN") or ""
     return base, email, token
+
+
+# The marker phrase every automation comment starts with. Used both as the
+# comment heading and as the JQL needle for finding issues already commented.
+VALIDATION_MARKER = "Rebuild automation validation"
+
+
+def fetch_commented_issue_keys() -> set:
+    """
+    Query Jira for every issue that already has a comment containing the
+    validation marker phrase, across ALL projects, and return the set of
+    issue keys. Used to skip re-posting on issues already validated.
+
+    Best-effort: missing config or any error logs a warning and returns an
+    empty set (so nothing is suppressed and the run proceeds normally).
+    Paginates through results in case there are many.
+    """
+    base, email, token = _jira_config()
+    if not (base and email and token):
+        print("[jira] config not set; cannot fetch commented issues — "
+              "no suppression this run.", file=sys.stderr)
+        return set()
+
+    auth = base64.b64encode(f"{email}:{token}".encode("utf-8")).decode("ascii")
+    jql = f'comment ~ "{VALIDATION_MARKER}" ORDER BY key'
+    url = f"{base}/rest/api/3/search/jql"
+    keys = set()
+    next_token = None
+
+    for _ in range(20):  # safety cap on pagination
+        body = {"jql": jql, "fields": ["key"], "maxResults": 100}
+        if next_token:
+            body["nextPageToken"] = next_token
+        data = json.dumps(body).encode("utf-8")
+        req = urllib.request.Request(url, data=data, method="POST")
+        req.add_header("Authorization", f"Basic {auth}")
+        req.add_header("Content-Type", "application/json")
+        req.add_header("Accept", "application/json")
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode("utf-8", "replace")[:300]
+            print(f"[jira] JQL search HTTP {e.code}: {detail}", file=sys.stderr)
+            return keys
+        except Exception as e:
+            print(f"[jira] JQL search failed: {e}", file=sys.stderr)
+            return keys
+
+        for issue in payload.get("issues", []):
+            k = issue.get("key")
+            if k:
+                keys.add(k)
+
+        next_token = payload.get("nextPageToken")
+        if not next_token or payload.get("isLast"):
+            break
+
+    return keys
 
 
 def post_comment(issue_key: str, body: str) -> bool:

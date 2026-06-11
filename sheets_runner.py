@@ -31,7 +31,11 @@ from comparator import (
 )
 from ai_classifier import classify_sections_pair
 from content_validator import validate_sections, validate_reviews, analyze_all
-from jira_reporter import build_comment as build_jira_comment, post_comment as post_jira_comment
+from jira_reporter import (
+    build_comment as build_jira_comment,
+    post_comment as post_jira_comment,
+    fetch_commented_issue_keys,
+)
 
 
 # All report timestamps are written in Belgrade local time (Europe/Belgrade,
@@ -47,6 +51,7 @@ SECTIONS_TAB = "sections"
 SEO_TAB = "seo"
 CUSTOM_TAB = "custom"
 CONTENT_TAB = "content"
+SUPPRESSION_TAB = "suppression"
 
 
 # ----- Headers for each tab ----------------------------------------------
@@ -153,6 +158,19 @@ CONTENT_RANGE = f"{CONTENT_TAB}!A:G"
 CONTENT_HEADER_RANGE = f"{CONTENT_TAB}!A1:G1"
 
 
+# 'suppression' tab — snapshot, refreshed each run, of the Jira issues that
+# ALREADY have a "Rebuild automation validation" comment (found via JQL). When
+# a URL pair's issue key is in this list, the run skips posting another comment
+# (it still writes all the sheet tabs). Columns: issue key + run timestamp.
+SUPPRESSION_HEADERS = [
+    "Issue key",
+    "Date stamp",
+]
+# Suppression tab spans 2 columns → A:B
+SUPPRESSION_RANGE = f"{SUPPRESSION_TAB}!A:B"
+SUPPRESSION_HEADER_RANGE = f"{SUPPRESSION_TAB}!A1:B1"
+
+
 def get_sheets_service():
     raw = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
     if not raw:
@@ -221,6 +239,8 @@ def ensure_all_headers(service, spreadsheet_id):
                     CUSTOM_HEADER_RANGE, f"{CUSTOM_TAB}!A1", CUSTOM_HEADERS)
     _ensure_headers(service, spreadsheet_id,
                     CONTENT_HEADER_RANGE, f"{CONTENT_TAB}!A1", CONTENT_HEADERS)
+    _ensure_headers(service, spreadsheet_id,
+                    SUPPRESSION_HEADER_RANGE, f"{SUPPRESSION_TAB}!A1", SUPPRESSION_HEADERS)
 
 
 def clear_data_rows(service, spreadsheet_id):
@@ -233,7 +253,7 @@ def clear_data_rows(service, spreadsheet_id):
     tab-only reference as "all data in the tab" and clear leaves no choice
     of starting row, so we use an explicit "A2:" range per tab to skip row 1.
     """
-    for tab in (REPORT_TAB, SECTIONS_TAB, SEO_TAB, CUSTOM_TAB, CONTENT_TAB):
+    for tab in (REPORT_TAB, SECTIONS_TAB, SEO_TAB, CUSTOM_TAB, CONTENT_TAB, SUPPRESSION_TAB):
         service.spreadsheets().values().clear(
             spreadsheetId=spreadsheet_id,
             range=f"{tab}!A2:ZZ",
@@ -428,6 +448,10 @@ def append_to_content(service, spreadsheet_id, rows):
     _append(service, spreadsheet_id, CONTENT_RANGE, rows)
 
 
+def append_to_suppression(service, spreadsheet_id, rows):
+    _append(service, spreadsheet_id, SUPPRESSION_RANGE, rows)
+
+
 def append_to_report(service, spreadsheet_id, rows):
     _append(service, spreadsheet_id, REPORT_RANGE, rows)
 
@@ -469,6 +493,21 @@ def main():
 
     timestamp = datetime.now(REPORT_TZ).strftime("%Y-%m-%d %H:%M:%S %Z")
     failures = 0
+
+    # Up front, ask Jira which issues ALREADY have a validation comment (one
+    # JQL query, all projects). These keys are skipped for comment posting and
+    # written to the suppression tab as this run's snapshot. Skipped entirely
+    # when SKIP_JIRA is set (the sheet-only workflow never touches Jira).
+    already_commented = set()
+    if not _skip_jira:
+        already_commented = fetch_commented_issue_keys()
+        print(f"Jira: {len(already_commented)} issue(s) already have a "
+              f"validation comment (will be skipped).", flush=True)
+        if already_commented:
+            append_to_suppression(
+                sheets, spreadsheet_id,
+                [[k, timestamp] for k in sorted(already_commented)],
+            )
 
     for i, (old_url, new_url, issue_key) in enumerate(pairs, start=1):
         print(f"\n[{i}/{len(pairs)}] {old_url}  →  {new_url}", flush=True)
@@ -586,10 +625,14 @@ def main():
             append_to_content(sheets, spreadsheet_id, content_rows)
 
             # ---- Jira comment: one per URL pair when column C has an issue
-            #      key, UNLESS the run opted out via SKIP_JIRA. The
-            #      sheet-only workflow sets SKIP_JIRA=1 so results land in the
-            #      sheet without touching Jira.
-            if issue_key and not _skip_jira:
+            #      key, UNLESS the run opted out via SKIP_JIRA or the issue
+            #      ALREADY has a validation comment (suppression).
+            if issue_key and _skip_jira:
+                print(f"  jira: {issue_key} skipped (SKIP_JIRA set)", flush=True)
+            elif issue_key and issue_key in already_commented:
+                print(f"  jira: {issue_key} skipped (already has a "
+                      f"validation comment)", flush=True)
+            elif issue_key:
                 comment = build_jira_comment(
                     restaurant,
                     new_data,
@@ -602,8 +645,6 @@ def main():
                 posted = post_jira_comment(issue_key, comment)
                 print(f"  jira: {issue_key} {'posted' if posted else 'skipped/failed'}",
                       flush=True)
-            elif issue_key and _skip_jira:
-                print(f"  jira: {issue_key} skipped (SKIP_JIRA set)", flush=True)
 
             ok = sum(1 for r in comparison_rows if r.get("match") == "OK")
             issues = len(comparison_rows) - ok
