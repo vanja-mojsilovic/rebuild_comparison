@@ -23,6 +23,7 @@ returns False, never aborting the run.
 
 import base64
 import json
+import re
 import os
 import sys
 import urllib.request
@@ -248,6 +249,172 @@ def _jira_config() -> tuple:
 # The marker phrase every automation comment starts with. Used both as the
 # comment heading and as the JQL needle for finding issues already commented.
 VALIDATION_MARKER = "Rebuild automation validation"
+
+# Phrase that precedes the NEW (rebuilt) site URL in the publish comment.
+_PUBLISH_PHRASE = "Changes published to"
+
+# JQL selecting the rebuild issues in QA not yet picked up by the QA team.
+_REBUILD_JQL = (
+    'project = web AND summary ~ "rebuild" AND NOT summary ~ "ADA" '
+    'AND NOT summary ~ "redesign" AND status = QA '
+    'AND assignee NOT IN membersOf("QA") ORDER BY key'
+)
+
+_URL_RE = re.compile(r'https?://[^\s<>"\)\]]+')
+
+
+def _adf_collect_text_and_links(node, out_text, out_links):
+    """
+    Recursively walk an ADF node, accumulating plain text into out_text and
+    link-mark hrefs into out_links. Each link is recorded as (char_offset,
+    href) where char_offset is the length of text collected so far — i.e. the
+    link's position in the flattened text. This lets callers tell whether a
+    link sits before or after a marker phrase even when the URL only exists as
+    a link mark and not as visible text.
+    """
+    if isinstance(node, dict):
+        if node.get("type") == "text":
+            offset = sum(len(t) for t in out_text)
+            for mark in node.get("marks", []) or []:
+                if mark.get("type") == "link":
+                    href = (mark.get("attrs") or {}).get("href")
+                    if href:
+                        out_links.append((offset, href))
+            out_text.append(node.get("text", ""))
+        for child in node.get("content", []) or []:
+            _adf_collect_text_and_links(child, out_text, out_links)
+    elif isinstance(node, list):
+        for child in node:
+            _adf_collect_text_and_links(child, out_text, out_links)
+
+
+def _extract_url_pair_from_comment(adf_body) -> tuple:
+    """
+    From one ADF comment body, return (old_url, new_url) when it contains the
+    publish phrase, else (None, None).
+
+    NEW = the first URL appearing AFTER the "Changes published to" phrase
+          (whether the URL is visible text or a link-mark href).
+    OLD = the first OTHER http(s) URL anywhere in the same comment.
+    """
+    text_parts, links = [], []  # links: [(offset, href), ...]
+    _adf_collect_text_and_links(adf_body, text_parts, links)
+    full_text = "".join(text_parts)
+
+    if _PUBLISH_PHRASE.lower() not in full_text.lower():
+        return None, None
+
+    phrase_idx = full_text.lower().find(_PUBLISH_PHRASE.lower())
+    after_start = phrase_idx + len(_PUBLISH_PHRASE)
+
+    def _clean(u):
+        return u.rstrip('.,);]')
+
+    # Candidate NEW urls after the phrase: from visible text and from link
+    # marks positioned after the phrase. Pick the earliest.
+    new_candidates = []  # (position, url)
+    for m in _URL_RE.finditer(full_text):
+        if m.start() >= after_start:
+            new_candidates.append((m.start(), _clean(m.group(0))))
+    for offset, href in links:
+        if offset >= after_start:
+            new_candidates.append((offset, _clean(href)))
+    if not new_candidates:
+        return None, None
+    new_candidates.sort()
+    new_url = new_candidates[0][1]
+
+    # All urls in the comment (text + links), in order, deduped.
+    all_urls = []
+    for m in _URL_RE.finditer(full_text):
+        u = _clean(m.group(0))
+        if u not in all_urls:
+            all_urls.append(u)
+    for _off, href in links:
+        u = _clean(href)
+        if u not in all_urls:
+            all_urls.append(u)
+
+    # OLD = first OTHER url.
+    old_url = next((u for u in all_urls if u != new_url), None)
+    if not old_url:
+        return None, None
+    return old_url, new_url
+
+
+def fetch_rebuild_url_pairs() -> list:
+    """
+    Run the rebuild-QA JQL, then for each issue scan its comments for the
+    "Changes published to <new-url>" publish comment and extract (old, new)
+    URLs. Returns a list of (old_url, new_url, issue_key) tuples — the same
+    shape read_url_pairs produces — for issues with a usable comment. Issues
+    without one are skipped silently (logged to stderr).
+
+    Best-effort: missing config or errors log and return [].
+    """
+    base, email, token = _jira_config()
+    if not (base and email and token):
+        print("[jira] config not set; cannot fetch rebuild issues.", file=sys.stderr)
+        return []
+
+    auth = base64.b64encode(f"{email}:{token}".encode("utf-8")).decode("ascii")
+    headers = {
+        "Authorization": f"Basic {auth}",
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+
+    # 1) JQL → issue keys (paginated).
+    keys = []
+    next_token = None
+    search_url = f"{base}/rest/api/3/search/jql"
+    for _ in range(20):
+        body = {"jql": _REBUILD_JQL, "fields": ["key"], "maxResults": 100}
+        if next_token:
+            body["nextPageToken"] = next_token
+        req = urllib.request.Request(search_url, data=json.dumps(body).encode("utf-8"),
+                                     method="POST")
+        for k, v in headers.items():
+            req.add_header(k, v)
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+        except Exception as e:
+            print(f"[jira] rebuild JQL search failed: {e}", file=sys.stderr)
+            return []
+        for issue in payload.get("issues", []):
+            if issue.get("key"):
+                keys.append(issue["key"])
+        next_token = payload.get("nextPageToken")
+        if not next_token or payload.get("isLast"):
+            break
+
+    # 2) Per issue, fetch comments and extract the publish URL pair.
+    pairs = []
+    for key in keys:
+        c_url = f"{base}/rest/api/3/issue/{key}/comment"
+        req = urllib.request.Request(c_url, method="GET")
+        for k, v in headers.items():
+            req.add_header(k, v)
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                cpayload = json.loads(resp.read().decode("utf-8"))
+        except Exception as e:
+            print(f"[jira] failed to read comments for {key}: {e}", file=sys.stderr)
+            continue
+        comments = cpayload.get("comments", []) or []
+        found = None
+        for c in reversed(comments):  # newest-first
+            old_url, new_url = _extract_url_pair_from_comment(c.get("body"))
+            if old_url and new_url:
+                found = (old_url, new_url, key)
+                break
+        if found:
+            pairs.append(found)
+        else:
+            print(f"[jira] {key}: no usable 'Changes published to' comment; skipped.",
+                  file=sys.stderr)
+    return pairs
 
 
 def fetch_commented_issue_keys() -> set:

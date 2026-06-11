@@ -35,6 +35,7 @@ from jira_reporter import (
     build_comment as build_jira_comment,
     post_comment as post_jira_comment,
     fetch_commented_issue_keys,
+    fetch_rebuild_url_pairs,
 )
 
 
@@ -179,6 +180,27 @@ def get_sheets_service():
     info = json.loads(raw)
     creds = Credentials.from_service_account_info(info, scopes=SCOPES)
     return build("sheets", "v4", credentials=creds, cache_discovery=False)
+
+
+def write_url_pairs(service, spreadsheet_id, pairs):
+    """
+    Overwrite the urls tab with the given (old, new, issue_key) pairs: clear
+    all rows below the header, then write the pairs starting at A2. Used when
+    populating the tab from Jira before a run.
+    """
+    service.spreadsheets().values().clear(
+        spreadsheetId=spreadsheet_id,
+        range=f"{URLS_TAB}!A2:Z",
+    ).execute()
+    if not pairs:
+        return
+    rows = [[old, new, key] for (old, new, key) in pairs]
+    service.spreadsheets().values().update(
+        spreadsheetId=spreadsheet_id,
+        range=f"{URLS_TAB}!A2",
+        valueInputOption="RAW",
+        body={"values": rows},
+    ).execute()
 
 
 def read_url_pairs(service, spreadsheet_id):
@@ -479,6 +501,18 @@ def main():
         print("SKIP_JIRA set — Jira comments will not be posted.", flush=True)
 
     sheets = get_sheets_service()
+
+    # When URLS_FROM_JIRA is set, populate the urls tab from Jira first: run
+    # the rebuild-QA JQL, extract each issue's published old/new URLs from its
+    # "Changes published to" comment, and overwrite the urls tab with them.
+    # Otherwise the urls tab is used as-is (manually entered).
+    _urls_from_jira = os.environ.get("URLS_FROM_JIRA", "").strip().lower() in ("1", "true", "yes")
+    if _urls_from_jira:
+        print("URLS_FROM_JIRA set — fetching URL pairs from Jira...", flush=True)
+        jira_pairs = fetch_rebuild_url_pairs()
+        print(f"Jira: found {len(jira_pairs)} rebuild issue(s) with a publish "
+              f"comment.", flush=True)
+        write_url_pairs(sheets, spreadsheet_id, jira_pairs)
 
     print("Reading URL pairs from sheet...", flush=True)
     pairs = read_url_pairs(sheets, spreadsheet_id)
