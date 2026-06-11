@@ -278,7 +278,8 @@ def _adf_collect_text_and_links(node, out_text, out_links):
     a link mark and not as visible text.
     """
     if isinstance(node, dict):
-        if node.get("type") == "text":
+        node_type = node.get("type")
+        if node_type == "text":
             offset = sum(len(t) for t in out_text)
             for mark in node.get("marks", []) or []:
                 if mark.get("type") == "link":
@@ -286,8 +287,19 @@ def _adf_collect_text_and_links(node, out_text, out_links):
                     if href:
                         out_links.append((offset, href))
             out_text.append(node.get("text", ""))
+        elif node_type == "hardBreak":
+            # Explicit line break inside a paragraph.
+            out_text.append("\n")
         for child in node.get("content", []) or []:
             _adf_collect_text_and_links(child, out_text, out_links)
+        # Block-level containers (paragraphs, headings, list items, etc.) have
+        # no text node between them in the flattened output, which would glue
+        # the end of one block to the start of the next — e.g. a URL ending a
+        # paragraph running into the first word of the next ("...com/New").
+        # Append a newline after each block so those boundaries survive.
+        if node_type in ("paragraph", "heading", "listItem", "blockquote",
+                          "tableCell", "tableHeader", "codeBlock"):
+            out_text.append("\n")
     elif isinstance(node, list):
         for child in node:
             _adf_collect_text_and_links(child, out_text, out_links)
