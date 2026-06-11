@@ -1,4 +1,4 @@
-name: Run comparisons (sheet only, no Jira)
+name: Rebuild comparing Sheet only
 
 on:
   workflow_dispatch:

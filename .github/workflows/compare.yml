@@ -1,4 +1,4 @@
-name: Run comparisons from Google Sheet
+name: Rebuild comparing with Jira comment
 
 on:
   workflow_dispatch:
