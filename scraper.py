@@ -44,7 +44,7 @@ import re
 
 
 SECTION_SELECTORS = [
-    # The actual SpotHopper cover-video container. This is the only wrapper that
+    # The actual SpotHopper cover-video container. This is the only wrapper
     # we can reliably classify as cover_video by selector alone — the
     # custom_html_1-section wrapper despite its name can hold anything
     # (EGift Cards button, announcements, custom HTML the operator wrote).
@@ -669,6 +669,28 @@ def _section_data(el: Tag) -> dict:
             visible_text = _clean_text(visible_text.replace(hidden_text, ""))
 
         combined = " ".join(x for x in [visible_text, hidden_text] if x)
+
+        # Some links have NO text at all — e.g. an empty overlay <a> placed on
+        # top of an image (a clickable badge/logo), whose only label is its
+        # aria-label / title. Without this, such links vanish from the report
+        # and a rebuild removing them goes undetected. Use the aria-label (or
+        # title, or a child img's alt) as the button's text so the link is
+        # captured and can be compared.
+        aria_label = ""
+        if not combined:
+            aria_label = _clean_text(
+                clickable.get("aria-label")
+                or clickable.get("title")
+                or ""
+            )
+            if not aria_label:
+                inner_img = clickable.find("img")
+                if inner_img:
+                    aria_label = _clean_text(inner_img.get("alt") or "")
+            if aria_label:
+                visible_text = aria_label
+                combined = aria_label
+
         if not combined:
             continue
 
