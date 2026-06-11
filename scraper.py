@@ -44,7 +44,7 @@ import re
 
 
 SECTION_SELECTORS = [
-    # The actual SpotHopper cover-video container. This is the only wrapper
+    # The actual SpotHopper cover-video container. This is the only wrapper that
     # we can reliably classify as cover_video by selector alone — the
     # custom_html_1-section wrapper despite its name can hold anything
     # (EGift Cards button, announcements, custom HTML the operator wrote).

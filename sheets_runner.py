@@ -55,14 +55,14 @@ REPORT_HEADERS = [
     "Run timestamp",
     "Restaurant",
     "Old URL",
-    "New URL",
     "Old site section name",
-    "New site section name",
     "Old element",
     "Old text",
     "Old href",
     "Old hidden",
     "Old HTML type",
+    "New URL",
+    "New site section name",
     "New element",
     "New text",
     "New href",
@@ -250,14 +250,14 @@ def build_report_rows(timestamp, restaurant, old_url, new_url, comparison_rows):
             timestamp,
             restaurant,
             old_url,
-            new_url,
             r.get("old_section_name", r.get("service", "")),
-            r.get("new_section_name", r.get("service", "")),
             r.get("old_element", ""),
             r.get("old_text", ""),
             r.get("old_href", ""),
             r.get("old_hidden", ""),
             r.get("old_html_type", ""),
+            new_url,
+            r.get("new_section_name", r.get("service", "")),
             r.get("new_element", ""),
             r.get("new_text", ""),
             r.get("new_href", ""),
@@ -618,8 +618,17 @@ def main():
             print(f"  ✗ FAILED: {e}", flush=True)
             traceback.print_exc()
             append_to_report(sheets, spreadsheet_id, [[
-                timestamp, "(error)", old_url, new_url,
-                "error", "error", "", str(e)[:500], "", "", "", "", "", "", "", "", "ERROR",
+                timestamp,            # Run timestamp
+                "(error)",            # Restaurant
+                old_url,              # Old URL
+                "error",              # Old site section name
+                "",                   # Old element
+                str(e)[:500],         # Old text  (the error message)
+                "", "", "",           # Old href / hidden / HTML type
+                new_url,              # New URL
+                "error",              # New site section name
+                "", "", "", "", "",   # New element / text / href / hidden / HTML type
+                "ERROR",              # Match
             ]])
 
     print(f"\nDone. {len(pairs) - failures} succeeded, {failures} failed.")
