@@ -250,8 +250,13 @@ def _jira_config() -> tuple:
 # comment heading and as the JQL needle for finding issues already commented.
 VALIDATION_MARKER = "Rebuild automation validation"
 
-# Phrase that precedes the NEW (rebuilt) site URL in the publish comment.
-_PUBLISH_PHRASE = "Changes published to"
+# Phrases that can precede the NEW (rebuilt) site URL in a publish comment.
+# A comment qualifies if it contains ANY of these; the new URL is the first
+# URL appearing after whichever phrase matches earliest.
+_PUBLISH_PHRASES = (
+    "Changes published to",
+    "New test location:",
+)
 
 # JQL selecting the rebuild issues in QA not yet picked up by the QA team.
 _REBUILD_JQL = (
@@ -293,19 +298,27 @@ def _extract_url_pair_from_comment(adf_body) -> tuple:
     From one ADF comment body, return (old_url, new_url) when it contains the
     publish phrase, else (None, None).
 
-    NEW = the first URL appearing AFTER the "Changes published to" phrase
-          (whether the URL is visible text or a link-mark href).
+    NEW = the first URL appearing AFTER the publish phrase ("Changes
+          published to" or "New test location:"), whether the URL is visible
+          text or a link-mark href.
     OLD = the first OTHER http(s) URL anywhere in the same comment.
     """
     text_parts, links = [], []  # links: [(offset, href), ...]
     _adf_collect_text_and_links(adf_body, text_parts, links)
     full_text = "".join(text_parts)
+    lower = full_text.lower()
 
-    if _PUBLISH_PHRASE.lower() not in full_text.lower():
+    # Find whichever publish phrase appears earliest in the comment.
+    phrase_hit = None  # (index, phrase)
+    for ph in _PUBLISH_PHRASES:
+        i = lower.find(ph.lower())
+        if i != -1 and (phrase_hit is None or i < phrase_hit[0]):
+            phrase_hit = (i, ph)
+    if phrase_hit is None:
         return None, None
 
-    phrase_idx = full_text.lower().find(_PUBLISH_PHRASE.lower())
-    after_start = phrase_idx + len(_PUBLISH_PHRASE)
+    phrase_idx, phrase = phrase_hit
+    after_start = phrase_idx + len(phrase)
 
     def _clean(u):
         return u.rstrip('.,);]')
@@ -412,7 +425,8 @@ def fetch_rebuild_url_pairs() -> list:
         if found:
             pairs.append(found)
         else:
-            print(f"[jira] {key}: no usable 'Changes published to' comment; skipped.",
+            print(f"[jira] {key}: no usable publish comment "
+                  f"(no 'Changes published to' / 'New test location:'); skipped.",
                   file=sys.stderr)
     return pairs
 
