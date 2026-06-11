@@ -377,14 +377,16 @@ def fetch_rebuild_url_pairs() -> list:
         "Accept": "application/json",
     }
 
-    # 1) JQL → issue keys (paginated via the stable /search endpoint).
+    # 1) JQL → issue keys. Jira removed the old /search endpoint (HTTP 410),
+    #    so use /search/jql with nextPageToken pagination.
     keys = []
-    start_at = 0
-    search_url = f"{base}/rest/api/3/search"
+    next_token = None
+    search_url = f"{base}/rest/api/3/search/jql"
     print(f"[jira] rebuild JQL: {_REBUILD_JQL}", flush=True)
     for _ in range(20):
-        body = {"jql": _REBUILD_JQL, "fields": ["key"],
-                "maxResults": 100, "startAt": start_at}
+        body = {"jql": _REBUILD_JQL, "fields": ["key"], "maxResults": 100}
+        if next_token:
+            body["nextPageToken"] = next_token
         req = urllib.request.Request(search_url, data=json.dumps(body).encode("utf-8"),
                                      method="POST")
         for k, v in headers.items():
@@ -402,11 +404,10 @@ def fetch_rebuild_url_pairs() -> list:
         issues = payload.get("issues", [])
         page_keys = [issue["key"] for issue in issues if issue.get("key")]
         keys.extend(page_keys)
-        total = payload.get("total")
-        print(f"[jira]   JQL page startAt={start_at}: {len(page_keys)} key(s) "
-              f"(total reported: {total})", flush=True)
-        start_at += len(issues)
-        if not issues or (total is not None and start_at >= total):
+        print(f"[jira]   JQL page: {len(page_keys)} key(s) "
+              f"(isLast={payload.get('isLast')})", flush=True)
+        next_token = payload.get("nextPageToken")
+        if not next_token or payload.get("isLast"):
             break
 
     print(f"[jira] JQL matched {len(keys)} issue(s): {', '.join(keys) if keys else '(none)'}",
@@ -461,12 +462,14 @@ def fetch_commented_issue_keys() -> set:
 
     auth = base64.b64encode(f"{email}:{token}".encode("utf-8")).decode("ascii")
     jql = f'comment ~ "{VALIDATION_MARKER}" ORDER BY key'
-    url = f"{base}/rest/api/3/search"
+    url = f"{base}/rest/api/3/search/jql"
     keys = set()
-    start_at = 0
+    next_token = None
 
     for _ in range(20):  # safety cap on pagination
-        body = {"jql": jql, "fields": ["key"], "maxResults": 100, "startAt": start_at}
+        body = {"jql": jql, "fields": ["key"], "maxResults": 100}
+        if next_token:
+            body["nextPageToken"] = next_token
         data = json.dumps(body).encode("utf-8")
         req = urllib.request.Request(url, data=data, method="POST")
         req.add_header("Authorization", f"Basic {auth}")
@@ -483,15 +486,13 @@ def fetch_commented_issue_keys() -> set:
             print(f"[jira] JQL search failed: {e}", file=sys.stderr)
             return keys
 
-        issues = payload.get("issues", [])
-        for issue in issues:
+        for issue in payload.get("issues", []):
             k = issue.get("key")
             if k:
                 keys.add(k)
 
-        total = payload.get("total")
-        start_at += len(issues)
-        if not issues or (total is not None and start_at >= total):
+        next_token = payload.get("nextPageToken")
+        if not next_token or payload.get("isLast"):
             break
 
     return keys
