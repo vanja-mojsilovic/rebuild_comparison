@@ -381,6 +381,7 @@ def fetch_rebuild_url_pairs() -> list:
     keys = []
     next_token = None
     search_url = f"{base}/rest/api/3/search/jql"
+    print(f"[jira] rebuild JQL: {_REBUILD_JQL}", flush=True)
     for _ in range(20):
         body = {"jql": _REBUILD_JQL, "fields": ["key"], "maxResults": 100}
         if next_token:
@@ -392,15 +393,22 @@ def fetch_rebuild_url_pairs() -> list:
         try:
             with urllib.request.urlopen(req, timeout=30) as resp:
                 payload = json.loads(resp.read().decode("utf-8"))
+        except urllib.error.HTTPError as e:
+            detail = e.read().decode("utf-8", "replace")[:400]
+            print(f"[jira] rebuild JQL HTTP {e.code}: {detail}", file=sys.stderr)
+            return []
         except Exception as e:
             print(f"[jira] rebuild JQL search failed: {e}", file=sys.stderr)
             return []
-        for issue in payload.get("issues", []):
-            if issue.get("key"):
-                keys.append(issue["key"])
+        page_keys = [issue["key"] for issue in payload.get("issues", []) if issue.get("key")]
+        keys.extend(page_keys)
+        print(f"[jira]   JQL page: {len(page_keys)} key(s)", flush=True)
         next_token = payload.get("nextPageToken")
         if not next_token or payload.get("isLast"):
             break
+
+    print(f"[jira] JQL matched {len(keys)} issue(s): {', '.join(keys) if keys else '(none)'}",
+          flush=True)
 
     # 2) Per issue, fetch comments and extract the publish URL pair.
     pairs = []
@@ -423,11 +431,13 @@ def fetch_rebuild_url_pairs() -> list:
                 found = (old_url, new_url, key)
                 break
         if found:
+            print(f"[jira]   {key}: OLD={found[0]}  NEW={found[1]}", flush=True)
             pairs.append(found)
         else:
-            print(f"[jira] {key}: no usable publish comment "
-                  f"(no 'Changes published to' / 'New test location:'); skipped.",
-                  file=sys.stderr)
+            print(f"[jira]   {key}: {len(comments)} comment(s), no usable publish "
+                  f"comment (no 'Changes published to' / 'New test location:'); skipped.",
+                  flush=True)
+    print(f"[jira] extracted {len(pairs)} URL pair(s) from comments.", flush=True)
     return pairs
 
 

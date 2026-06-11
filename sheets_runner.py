@@ -513,6 +513,9 @@ def main():
         print(f"Jira: found {len(jira_pairs)} rebuild issue(s) with a publish "
               f"comment.", flush=True)
         write_url_pairs(sheets, spreadsheet_id, jira_pairs)
+    else:
+        print("URLS_FROM_JIRA not set — using urls tab as entered "
+              "(no Jira fetch).", flush=True)
 
     print("Reading URL pairs from sheet...", flush=True)
     pairs = read_url_pairs(sheets, spreadsheet_id)
