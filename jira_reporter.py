@@ -511,6 +511,50 @@ def fetch_commented_issue_keys() -> set:
     return keys
 
 
+def fetch_issue_summary_assignee(issue_key: str) -> tuple:
+    """
+    Fetch (summary, assignee) for a single Jira issue.
+
+    - summary: the issue's summary text (or "").
+    - assignee: the assignee's display name, falling back to their email if
+      there's no display name, or "Unassigned" when the issue has no assignee.
+
+    Best-effort: missing config or any error returns ("", "") so logging never
+    aborts the run.
+    """
+    if not issue_key:
+        return "", ""
+    base, email, token = _jira_config()
+    if not (base and email and token):
+        return "", ""
+
+    auth = base64.b64encode(f"{email}:{token}".encode("utf-8")).decode("ascii")
+    url = f"{base}/rest/api/3/issue/{issue_key}?fields=summary,assignee"
+    req = urllib.request.Request(url, method="GET")
+    req.add_header("Authorization", f"Basic {auth}")
+    req.add_header("Accept", "application/json")
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+    except Exception as e:
+        print(f"[jira] failed to fetch summary/assignee for {issue_key}: {e}",
+              file=sys.stderr)
+        return "", ""
+
+    fields = payload.get("fields", {}) or {}
+    summary = (fields.get("summary") or "").strip()
+
+    assignee_obj = fields.get("assignee")
+    if not assignee_obj:
+        assignee = "Unassigned"
+    else:
+        assignee = (assignee_obj.get("displayName")
+                    or assignee_obj.get("emailAddress")
+                    or "Unassigned").strip()
+
+    return summary, assignee
+
+
 def post_comment(issue_key: str, body: str) -> bool:
     """
     Post `body` as a comment on the Jira issue `issue_key`. Returns True on

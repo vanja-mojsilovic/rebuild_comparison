@@ -36,6 +36,7 @@ from jira_reporter import (
     post_comment as post_jira_comment,
     fetch_commented_issue_keys,
     fetch_rebuild_url_pairs,
+    fetch_issue_summary_assignee,
 )
 
 
@@ -179,9 +180,11 @@ ARCHIVE_TAB = "archive"
 ARCHIVE_HEADERS = [
     "Issue key",
     "Time stamp",
+    "Summary",
+    "Assignee",
 ]
-ARCHIVE_RANGE = f"{ARCHIVE_TAB}!A:B"
-ARCHIVE_HEADER_RANGE = f"{ARCHIVE_TAB}!A1:B1"
+ARCHIVE_RANGE = f"{ARCHIVE_TAB}!A:D"
+ARCHIVE_HEADER_RANGE = f"{ARCHIVE_TAB}!A1:D1"
 
 
 def get_sheets_service():
@@ -711,10 +714,11 @@ def main():
                 print(f"  jira: {issue_key} {'posted' if posted else 'skipped/failed'}",
                       flush=True)
                 # Log every SUCCESSFUL post to the permanent (append-only)
-                # archive tab: issue key + this run's timestamp.
+                # archive tab: issue key, run timestamp, summary, assignee.
                 if posted:
+                    summary, assignee = fetch_issue_summary_assignee(issue_key)
                     append_to_archive(sheets, spreadsheet_id,
-                                      [[issue_key, timestamp]])
+                                      [[issue_key, timestamp, summary, assignee]])
 
             ok = sum(1 for r in comparison_rows if r.get("match") == "OK")
             issues = len(comparison_rows) - ok
