@@ -1,4 +1,4 @@
-name: Run comparisons (manual URLs, post to Jira)
+name: Run comparisons manual URLs post to Jira
 
 on:
   workflow_dispatch:
