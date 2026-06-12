@@ -172,6 +172,18 @@ SUPPRESSION_RANGE = f"{SUPPRESSION_TAB}!A:B"
 SUPPRESSION_HEADER_RANGE = f"{SUPPRESSION_TAB}!A1:B1"
 
 
+# 'archive' tab — a PERMANENT, append-only log (never cleared) of every Jira
+# comment this script successfully posts: one row per post, issue key + the
+# run timestamp. Distinct from 'suppression', which is a per-run snapshot.
+ARCHIVE_TAB = "archive"
+ARCHIVE_HEADERS = [
+    "Issue key",
+    "Time stamp",
+]
+ARCHIVE_RANGE = f"{ARCHIVE_TAB}!A:B"
+ARCHIVE_HEADER_RANGE = f"{ARCHIVE_TAB}!A1:B1"
+
+
 def get_sheets_service():
     raw = os.environ.get("GOOGLE_SERVICE_ACCOUNT_JSON")
     if not raw:
@@ -263,6 +275,8 @@ def ensure_all_headers(service, spreadsheet_id):
                     CONTENT_HEADER_RANGE, f"{CONTENT_TAB}!A1", CONTENT_HEADERS)
     _ensure_headers(service, spreadsheet_id,
                     SUPPRESSION_HEADER_RANGE, f"{SUPPRESSION_TAB}!A1", SUPPRESSION_HEADERS)
+    _ensure_headers(service, spreadsheet_id,
+                    ARCHIVE_HEADER_RANGE, f"{ARCHIVE_TAB}!A1", ARCHIVE_HEADERS)
 
 
 def clear_data_rows(service, spreadsheet_id):
@@ -474,6 +488,10 @@ def append_to_suppression(service, spreadsheet_id, rows):
     _append(service, spreadsheet_id, SUPPRESSION_RANGE, rows)
 
 
+def append_to_archive(service, spreadsheet_id, rows):
+    _append(service, spreadsheet_id, ARCHIVE_RANGE, rows)
+
+
 def append_to_report(service, spreadsheet_id, rows):
     _append(service, spreadsheet_id, REPORT_RANGE, rows)
 
@@ -682,6 +700,11 @@ def main():
                 posted = post_jira_comment(issue_key, comment)
                 print(f"  jira: {issue_key} {'posted' if posted else 'skipped/failed'}",
                       flush=True)
+                # Log every SUCCESSFUL post to the permanent (append-only)
+                # archive tab: issue key + this run's timestamp.
+                if posted:
+                    append_to_archive(sheets, spreadsheet_id,
+                                      [[issue_key, timestamp]])
 
             ok = sum(1 for r in comparison_rows if r.get("match") == "OK")
             issues = len(comparison_rows) - ok
