@@ -518,6 +518,15 @@ def main():
     if _skip_jira:
         print("SKIP_JIRA set — Jira comments will not be posted.", flush=True)
 
+    # When FORCE_JIRA_COMMENT is set, the suppression check is bypassed: a
+    # comment is posted for every issue key even if the issue already has a
+    # validation comment. Used by the manual-URL workflow when you explicitly
+    # want to re-comment regardless of history.
+    _force_comment = os.environ.get("FORCE_JIRA_COMMENT", "").strip().lower() in ("1", "true", "yes")
+    if _force_comment:
+        print("FORCE_JIRA_COMMENT set — will comment even if one already exists "
+              "(suppression bypassed).", flush=True)
+
     sheets = get_sheets_service()
 
     # When URLS_FROM_JIRA is set, populate the urls tab from Jira first: run
@@ -552,9 +561,10 @@ def main():
     # Up front, ask Jira which issues ALREADY have a validation comment (one
     # JQL query, all projects). These keys are skipped for comment posting and
     # written to the suppression tab as this run's snapshot. Skipped entirely
-    # when SKIP_JIRA is set (the sheet-only workflow never touches Jira).
+    # when SKIP_JIRA is set (no Jira at all) or FORCE_JIRA_COMMENT is set
+    # (comment regardless of history → no suppression).
     already_commented = set()
-    if not _skip_jira:
+    if not _skip_jira and not _force_comment:
         already_commented = fetch_commented_issue_keys()
         print(f"Jira: {len(already_commented)} issue(s) already have a "
               f"validation comment (will be skipped).", flush=True)
