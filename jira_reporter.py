@@ -256,6 +256,7 @@ VALIDATION_MARKER = "Rebuild automation validation"
 _PUBLISH_PHRASES = (
     "Changes published to",
     "New test location:",
+    "Test location:",
 )
 
 # JQL selecting the rebuild issues in QA not yet picked up by the QA team.
